@@ -2,6 +2,14 @@
 
 A new original N64 game
 
+## Running on MiSTer FPGA
+
+To run the game on MiSTer FPGA, you need the latest N64 core
+with libdragon/tiny3d support (2026).
+
+Download the latest .rbf core
+[Mister N64](https://github.com/MiSTer-devel/N64_MiSTer)
+
 ## Building
 
 Use [libdragon](https://github.com/DragonMinded/libdragon) to build the project.
