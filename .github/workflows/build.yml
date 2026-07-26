@@ -1,0 +1,86 @@
+name: Build N64 ROM
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare mesh_export zip
+        run: |
+          mkdir -p tools
+          if [ -d "tools/mesh_export" ]; then
+            cd tools && zip -r mesh_export.zip mesh_export/ && cd ..
+          else
+            zip -r tools/mesh_export.zip . -i README.md
+          fi
+
+      - name: Fix permissions
+        run: sudo chmod -R 777 .
+
+      - name: Build Docker Container
+        run: docker build -t spellcraft-dev-env .
+
+      - name: Fix blend file library paths
+        run: |
+          docker run --rm \
+            -v $(pwd):/spellcraft \
+            -w /spellcraft \
+            spellcraft-dev-env \
+            /opt/blender/blender --background --python-expr "
+          import bpy, os, glob
+
+          FAST64_EXT = '/home/ubuntu/.config/blender/5.1/extensions/user_default/fast64-main'
+
+          for blend_file in glob.glob('/spellcraft/assets/**/*.blend', recursive=True):
+              print('Checking:', blend_file)
+              try:
+                  bpy.ops.wm.open_mainfile(filepath=blend_file)
+                  modified = False
+                  for lib in bpy.data.libraries:
+                      fp = lib.filepath.replace('\\\\', '/')
+                      if 'fast64' in fp.lower() and ('Users' in fp or 'AppData' in fp or '/c/' in fp):
+                          fp_norm = fp.replace('\\\\', '/')
+                          idx = fp_norm.lower().find('fast64/')
+                          if idx != -1:
+                              rel = fp_norm[idx + len('fast64/'):]
+                              new_path = os.path.join(FAST64_EXT, rel)
+                              print(f'  Remap: {lib.filepath} -> {new_path}')
+                              lib.filepath = new_path
+                              modified = True
+                  if modified:
+                      bpy.ops.wm.save_mainfile()
+                      print('  Saved:', blend_file)
+              except Exception as e:
+                  print('  Error:', blend_file, e)
+          "
+
+      - name: Build ROM inside Container
+        run: |
+          docker run --rm \
+            -v $(pwd):/spellcraft \
+            -w /spellcraft \
+            -e BLENDER_5=/opt/blender/blender \
+            spellcraft-dev-env \
+            make
+
+      - name: Upload ROM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spellcraft-rom
+          path: "*.z64"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Spellcraft ROM #${{ github.run_number }}"
+          files: "*.z64"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
