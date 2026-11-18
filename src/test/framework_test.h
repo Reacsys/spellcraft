@@ -15,6 +15,8 @@ struct test_context {
     jmp_buf jump;
 };
 
+typedef struct test_context test_context_t;
+
 typedef void (*test_callback)(struct test_context* context);
 
 void test_run_raw(test_callback callback, const char* name);
@@ -52,7 +54,9 @@ void test_str_equal_raw(struct test_context* t, const char* expected, const char
 
 void test_report_failures();
 
+// loads a scene shared between tests, does nothing if it is already loaded
 void test_load_scene(const char* name);
+void test_unload_scene();
 
 typedef void (*test_deferred_call)(void* data);
 

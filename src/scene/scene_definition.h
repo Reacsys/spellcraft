@@ -5,6 +5,7 @@
 #include "../math/vector2.h"
 #include "../math/quaternion.h"
 #include "../cutscene/expression.h"
+#include "../collision/collider_shape.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -38,13 +39,30 @@ enum entity_type_id {
     ENTITY_TYPE_trigger_cube,
     ENTITY_TYPE_line_mesh,
     ENTITY_TYPE_script_runner,
-    ENTITY_TYPE_water_waves,
-    ENTITY_TYPE_gem_key_door,
     ENTITY_TYPE_golem_enemy,
     ENTITY_TYPE_pinwheel,
+    ENTITY_TYPE_breakable,
+    ENTITY_TYPE_jelly_pot,
+    ENTITY_TYPE_comm_stone,
+    ENTITY_TYPE_repair_scene,
+    ENTITY_TYPE_repair_part,
+    ENTITY_TYPE_item_pickup,
+    ENTITY_TYPE_repair_interaction,
+    ENTITY_TYPE_pulley_gate,
+    ENTITY_TYPE_dynamic_water,
+    ENTITY_TYPE_cut_rope,
+    ENTITY_TYPE_rune_upgrade,
     // type enum insert point
     
     ENTITY_TYPE_count,
+};
+
+enum tutorial_menu_state {
+    TUTORIAL_MENU_STATE_NONE,
+    TUTORIAL_MENU_CREATE_FIRE,
+    TUTORIAL_MENU_CAST,
+    TUTORIAL_MENU_MEDITATE,
+    TUTORIAL_STATE_COUNT,
 };
 
 enum fixed_entity_ids {
@@ -53,8 +71,6 @@ enum fixed_entity_ids {
 
     ENTITY_ID_FIRST_DYNAMIC,
 };
-
-typedef uint32_t collectable_sub_type;
 
 #define ROOM_NONE 0xFFFF
 
@@ -77,8 +93,8 @@ struct crate_definition {
 
 enum collectable_type {
     COLLECTABLE_TYPE_HEALTH,
-    COLLECTABLE_TYPE_POTION,
-    COLLECTABLE_TYPE_SPELL_RUNE,
+    COLLECTABLE_TYPE_MANA_UPGRADE,
+    COLLECTABLE_TYPE_SPELL_SCROLL,
 };
 
 enum inventory_item_type {
@@ -116,6 +132,7 @@ typedef uint16_t any_variable;
 
 typedef char* script_location;
 typedef char* scene_entry_point;
+typedef char* mesh_location;
 
 struct line_mesh_data {
     uint8_t point_count;
@@ -129,7 +146,7 @@ struct collectable_definition {
     struct Vector3 position;
     struct Vector2 rotation;
     enum collectable_type collectable_type;
-    collectable_sub_type collectable_sub_type;
+    boolean_variable has_item;
 };
 
 struct training_dummy_definition {
@@ -168,6 +185,15 @@ struct water_cube_definition {
     struct Vector3 scale;
 };
 
+struct dynamic_water_definition {
+    struct Vector3 position;
+    mesh_location mesh;
+    mesh_location mesh_lod1;
+    collider_shape_t collider;
+    struct Vector3 other_level;
+    boolean_variable is_other_level;
+};
+
 struct mana_plant_definition {
     struct Vector3 position;
     struct Vector2 rotation;
@@ -189,6 +215,7 @@ struct door_definition {
     room_id room_a;
     room_id room_b;
     boolean_variable unlocked;
+    integer_variable key_lock_3;
 };
 
 struct room_portal_definition {
@@ -197,12 +224,15 @@ struct room_portal_definition {
     float scale;
     room_id room_a;
     room_id room_b;
+    mesh_location mesh;
 };
 
 struct burning_thorns_definition {
     struct Vector3 position;
     struct Vector2 rotation;
     float scale;
+    mesh_location mesh;
+    boolean_variable is_green;
 };
 
 struct timed_torch_puzzle_definition {
@@ -355,22 +385,6 @@ struct line_mesh_definition {
     line_mesh_data_ref mesh;
 };
 
-struct water_waves_definition {
-    struct Vector3 position;    
-    uint16_t width;
-    uint16_t height;
-};
-
-struct gem_key_door_definition {
-    struct Vector3 position;
-    struct Vector2 rotation;
-    room_id room_a;
-    room_id room_b;
-    boolean_variable unlocked;
-    integer_variable key_gems;
-    uint8_t gem_count;
-};
-
 struct golem_enemy_definition {
     struct Vector3 position;    
     struct Vector2 rotation;
@@ -380,6 +394,82 @@ struct golem_enemy_definition {
 struct pinwheel_definition {
     struct Vector3 position;
     struct Quaternion rotation;
+};
+
+enum breakable_type {
+    BREAKABLE_FIRE_POT_MED,
+    BREAKABLE_TYPE_COUNT,
+};
+
+struct breakable_definition {
+    struct Vector3 position;     
+    struct Vector2 rotation; 
+    enum breakable_type breakable_type;
+};
+
+struct jelly_pot_definition {
+    struct Vector3 position;    
+    struct Vector2 rotation; 
+};
+
+struct comm_stone_definition {
+    struct Vector3 position;    
+};
+
+struct repair_scene_definition {
+    struct Vector3 position;    
+    struct Quaternion rotation;
+    float fov;
+    boolean_variable puzzle_complete;
+    scene_entry_point exit_scene;
+};
+
+struct repair_part_definition {
+    struct Vector3 position;    
+    struct Quaternion rotation;
+    struct Vector3 start_position;
+    struct Quaternion start_rotation;
+    boolean_variable has_part;
+    bool prevent_rotation;
+    entity_spawner depends_on;
+    mesh_location mesh;
+};
+
+struct item_pickup_definition {
+    struct Vector3 position;
+    struct Vector2 rotation;
+    boolean_variable has_item;
+    integer_variable has_item_count;
+    mesh_location mesh;
+};
+
+struct repair_interaction_definition {
+    struct Vector3 position;
+    struct Vector2 rotation;
+    boolean_variable is_repaired;
+    mesh_location broken_mesh;
+    mesh_location repaired_mesh;
+    scene_entry_point on_interact;
+};
+
+struct pulley_gate_definition {
+    struct Vector3 position;    
+    struct Vector2 rotation;
+    struct Vector3 harness_position;
+    boolean_variable output;
+};
+
+struct cut_rope_definition {
+    struct Vector3 position;
+    entity_spawner connected_to;
+};
+
+struct rune_upgrade_definition {
+    struct Vector3 position;    
+    struct Vector2 rotation;
+    mesh_location mesh;
+    integer_variable rune_level;
+    boolean_variable has_item;
 };
 
 // definition insert point

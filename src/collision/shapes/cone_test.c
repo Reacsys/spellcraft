@@ -6,7 +6,7 @@
 #include <libdragon.h>
 
 void test_cone_minkowski_sum(struct test_context* t) {
-    union dynamic_object_type_data data = {
+    collider_shape_data_t data = {
         .cone = {
             .size = { 1.0f, 1.0f, 2.0f },
         },
@@ -34,7 +34,7 @@ void test_cone_minkowski_sum(struct test_context* t) {
 }
 
 void test_cone_bounding_box(struct test_context* t) {
-    union dynamic_object_type_data data = {
+    collider_shape_data_t data = {
         .cone = {
             .size = { 1.0f, 1.0f, 2.0f },
         },
@@ -50,12 +50,14 @@ void test_cone_bounding_box(struct test_context* t) {
     test_near_equalf(t, 1.0f, bb.max.y);
     test_near_equalf(t, 2.0f, bb.max.z);
 
+    // rotation follows vector3RotateWith2 so a positive
+    // angle swings the cone axis from +z towards -x
     vector2ComplexFromAngle(M_PI * 0.25f, &rotation);
     cone_bounding_box(&data, &rotation, &bb);
-    test_near_equalf(t, 0.0f, bb.min.x);
+    test_near_equalf(t, -2.12132049f, bb.min.x);
     test_near_equalf(t, -1.0f, bb.min.y);
     test_near_equalf(t, 0.0f, bb.min.z);
-    test_near_equalf(t, 2.12132049f, bb.max.x);
+    test_near_equalf(t, 0.0f, bb.max.x);
     test_near_equalf(t, 1.0f, bb.max.y);
     test_near_equalf(t, 2.12132049f, bb.max.z);
 }

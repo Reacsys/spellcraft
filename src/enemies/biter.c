@@ -11,12 +11,13 @@
 #include "vision.h"
 #include "../math/mathf.h"
 
-#define VISION_DISTANCE     8.0f
-#define ATTACK_RANGE        1.0f
-#define MOVE_SPEED          6.5f
-#define MOVE_ACCELERATION   8.0f
+#define VISION_DISTANCE             8.0f
+#define CYLINDER_VISION_DISTANCE    4.0f
+#define ATTACK_RANGE                1.0f
+#define MOVE_SPEED                  6.5f
+#define MOVE_ACCELERATION           8.0f
 
-#define BITER_HEALTH        30.0f
+#define BITER_HEALTH                30.0f
 
 static struct Vector2 biter_max_rotation;
 
@@ -32,6 +33,7 @@ static struct dynamic_object_type biter_collision_type = {
     // about a 40 degree slope
     .max_stable_slope = 0.219131191f,
     .center = { 0.0f, 0.4f, 0.0f },
+    .density = DYNAMIC_DENSITY_MEDIUM,
 };
 
 static struct spatial_trigger_type biter_vision_type = {
@@ -41,6 +43,7 @@ static struct spatial_trigger_type biter_vision_type = {
             .radius = VISION_DISTANCE,
             .half_height = VISION_DISTANCE,
             .angle = {SQRT_1_2, SQRT_1_2},
+            .cylinder_radius = CYLINDER_VISION_DISTANCE,
         },
     },
 };
@@ -170,6 +173,7 @@ void biter_update_chase(struct biter* biter) {
         struct Vector3 targetVelocity;
         vector3RotatedSpeed(&biter->transform.rotation, &targetVelocity, MOVE_SPEED);
         vector3MoveTowards(&biter->dynamic_object.velocity, &targetVelocity, MOVE_ACCELERATION * fixed_time_step, &biter->dynamic_object.velocity);
+        dynamic_object_wake(&biter->dynamic_object);
     }
 }
 
@@ -301,8 +305,6 @@ void biter_init(struct biter* biter, struct biter_definition* definition, entity
         id
     );
 
-    biter->dynamic_object.density_class = DYNAMIC_DENSITY_MEDIUM;
-
     collision_scene_add(&biter->dynamic_object);
     collision_scene_add_trigger(&biter->vision);
 
@@ -322,7 +324,7 @@ void biter_init(struct biter* biter, struct biter_definition* definition, entity
     biter->current_state = BITER_STATE_IDLE;
     biter->rest_timer = 0.0f;
 
-    animator_init(&biter->animator, biter->renderable.mesh_render.armature.bone_count);
+    animator_init(&biter->animator, biter->renderable.mesh_render.armature.definition);
 
     vector2ComplexFromAngle(fixed_time_step * 3.0f, &biter_max_rotation);
     biter_enter_idle(biter);

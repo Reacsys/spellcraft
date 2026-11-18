@@ -363,6 +363,9 @@ TMESH_COMMAND_VERTICES = 0
 TMESH_COMMAND_TRIANGLES = 1
 TMESH_COMMAND_MATERIAL = 2
 TMESH_COMMAND_BONE = 3
+TMESH_COMMAND_PLACEHOLDER = 4
+
+COLOR_SWEEP_TIME_SCALE = 4096
 
 def _build_vertices_command(source_index: int, offset: int, vertex_count: int):
     return struct.pack('>BBBH', TMESH_COMMAND_VERTICES, offset, vertex_count, source_index)
@@ -413,6 +416,12 @@ def _build_material_command(material_index: int):
 def _build_bone_command(bone_index: int):
     return struct.pack('>Bh', TMESH_COMMAND_BONE, bone_index)
 
+def _build_placeholder_command(placeholder_index: int):
+    return struct.pack('>BB', TMESH_COMMAND_PLACEHOLDER, placeholder_index)
+
+def _pack_sweep_time(value: float) -> int:
+    return min(max(math.floor(value * COLOR_SWEEP_TIME_SCALE + 0.5), 0), COLOR_SWEEP_TIME_SCALE)
+
 def _write_mesh_chunk_common(batch_layouts: list[_batch_layout], chunk: mesh_optimizer.mesh_chunk, settings: export_settings.ExportSettings, command_list: list[bytes], vertices: list[bytes], current_bone: int) -> int:
     for batch in batch_layouts:
         source_index = len(vertices)
@@ -435,11 +444,10 @@ def _write_mesh_chunk_common(batch_layouts: list[_batch_layout], chunk: mesh_opt
         command_list.append(_build_vertices_command(source_index + last_start // 2, batch.offset + last_start, vertex_count - last_start))
 
         for i in range(0, vertex_count, 2):
-            vertices.append(_pack_vertices(
-                chunk, 
-                batch.new_indices[i], batch.new_indices[i + 1] if i + 1 < len(batch.new_indices) else -1,
-                settings
-            ))
+            a = batch.new_indices[i]
+            b = batch.new_indices[i + 1] if i + 1 < len(batch.new_indices) else -1
+
+            vertices.append(_pack_vertices(chunk, a, b, settings))
 
         command_list.append(_build_triangles_command(batch.triangles))
 
@@ -471,7 +479,7 @@ def _sort_chunks(chunks: list[mesh_optimizer.mesh_chunk], sort_direction: mathut
     sort_result = sorted(zipped, key=lambda x: x[1])
     return list(map(lambda x: x[0], sort_result))
 
-def write_mesh(mesh_list: list[mesh.mesh_data], arm: armature.ArmatureData | None, attachments: list[armature.BoneLinkage], settings: export_settings.ExportSettings, file):
+def write_mesh(mesh_list: list[mesh.mesh_data], arm: armature.ArmatureData | None, attachments: list[armature.BoneLinkage], settings: export_settings.ExportSettings, file, preserve_chunk_order = False):
     file.write('T3MS'.encode())
 
     chunks: list[mesh_optimizer.mesh_chunk] = []
@@ -495,10 +503,11 @@ def write_mesh(mesh_list: list[mesh.mesh_data], arm: armature.ArmatureData | Non
 
         chunks += mesh_optimizer.chunkify_mesh(mesh, mat or settings.default_material, settings.default_material)
 
-    if settings.sort_direction:
-        chunks = _sort_chunks(chunks, settings.sort_direction)
-    else:
-        chunks = mesh_optimizer.determine_chunk_order(chunks, settings.default_material)
+    if not preserve_chunk_order:
+        if settings.sort_direction:
+            chunks = _sort_chunks(chunks, settings.sort_direction)
+        else:
+            chunks = mesh_optimizer.determine_chunk_order(chunks, settings.default_material)
 
     commands = []
     vertices = []
@@ -509,19 +518,26 @@ def write_mesh(mesh_list: list[mesh.mesh_data], arm: armature.ArmatureData | Non
         material_romname_encoded = settings.default_material_name.encode()
         file.write(len(material_romname_encoded).to_bytes(1, 'big'))
         file.write(material_romname_encoded)
+    elif not settings.default_material.is_empty():
+        file.write(b'\0')
+        serialize.serialize_material_file(file, settings.default_material, None)
     else:
         # no material specified
-        print("invalid material name settings.default_material_name ", settings.default_material_name)
-        file.write(b'\0')
+        raise Exception("invalid material name settings")
 
     material_delta.apply_material_delta(settings.default_material, current_material)
 
     material_transitions: list[tuple[material.Material, material.Material]] = []
 
     current_bone = -1
+    current_placeholder = None
 
     for chunk in chunks:
         _transition_material(current_material, chunk.material, commands, material_transitions)
+
+        if current_placeholder != chunk.data.placeholder_index and chunk.data.placeholder_index is not None:
+            commands.append(_build_placeholder_command(chunk.data.placeholder_index))
+            current_placeholder = chunk.data.placeholder_index
 
         if settings.sort_direction:
             current_bone = _write_much_chunk_sorted(chunk, settings, commands, vertices, settings.sort_direction, current_bone)
@@ -531,6 +547,8 @@ def write_mesh(mesh_list: list[mesh.mesh_data], arm: armature.ArmatureData | Non
     if settings.default_material_name:
         _transition_material(current_material, settings.default_material, commands, material_transitions)
 
+    radius = max(el.get_radius() for el in mesh_list) if len(mesh_list) > 0 else 0
+    file.write(struct.pack('>f', radius))
     file.write(len(vertices).to_bytes(2, 'big'))
 
     for vertex in vertices:

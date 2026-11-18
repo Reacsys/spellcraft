@@ -5,7 +5,9 @@
 #include "../math/mathf.h"
 #include "../particles/static_particles.h"
 #include "../profile/profile.h"
+#include "fog.h"
 #include "defs.h"
+#include "render.h"
 
 void render_batch_init(struct render_batch* batch, struct Transform* camera_transform, struct frame_memory_pool* pool) {
     batch->element_count = 0;
@@ -16,6 +18,8 @@ void render_batch_init(struct render_batch* batch, struct Transform* camera_tran
     batch->rotation_2d.x = batch->camera_matrix[0][0];
     batch->rotation_2d.y = batch->camera_matrix[0][2];
     vector2Normalize(&batch->rotation_2d, &batch->rotation_2d);
+
+    batch->curr_pos = NULL;
 }
 
 struct render_batch_element* render_batch_add(struct render_batch* batch) {
@@ -25,6 +29,15 @@ struct render_batch_element* render_batch_add(struct render_batch* batch) {
 
     struct render_batch_element* result = &batch->elements[batch->element_count];
     ++batch->element_count;
+
+    if (batch->curr_pos) {
+        result->distance = -(batch->camera_matrix[0][2] * batch->curr_pos->x + 
+            batch->camera_matrix[1][2] * batch->curr_pos->y + 
+            batch->camera_matrix[2][2] * batch->curr_pos->z + 
+            batch->camera_matrix[3][2]);
+    } else {
+        result->distance = 0.0f;
+    }
 
     result->material = NULL;
     result->type = RENDER_BATCH_MESH;
@@ -119,6 +132,10 @@ struct render_batch_element* render_batch_add_tmesh(
         if (armature->has_env_color) {
             attr_count += 1;
         }
+
+        if (armature->placeholders) {
+            attr_count += 1;
+        }
     }
 
     if (attr_count) {
@@ -194,7 +211,7 @@ struct render_batch_element* render_batch_add_tmesh(
         if (armature->image_frame_0 != NO_IMAGE_FRAME && armature->image_frame_0 < armature->definition->image_frames_0) {
             attr->type = ELEMENT_ATTR_IMAGE;
             attr->offset = 0;
-            attr->image.sprite = armature->definition->frames[armature->image_frame_0];
+            attr->image.data = armature->definition->frames[armature->image_frame_0]->data;
             ++attr;
         }
 
@@ -207,6 +224,13 @@ struct render_batch_element* render_batch_add_tmesh(
         if (armature->has_env_color) {
             attr->type = ELEMENT_ATTR_ENV_COLOR;
             attr->color = armature->env_color;
+            ++attr;
+        }
+
+        if (armature->placeholders) {
+            attr->type = ELEMENT_ATTR_MAT_PLACEHOLDERS;
+            attr->placeholders.count = armature->definition->placeholder_count;
+            attr->placeholders.addr = (uint32_t)armature->placeholders;
             ++attr;
         }
     }
@@ -256,9 +280,9 @@ struct render_batch_element* render_batch_add_dynamic_particles(
     T3DMat4FP* mtx
 ) {
     int aligned_count = (count + 1) & ~1;
-    render_batch_particles_t* particles = frame_malloc(batch->pool, ALIGN_16(sizeof(render_batch_particles_t)) + sizeof(TPXParticle) * (aligned_count >> 1));
+    render_batch_particles_t* particles = frame_malloc(batch->pool, ALIGN_16(sizeof(render_batch_particles_t)) + sizeof(TPXParticleS8) * (aligned_count >> 1));
 
-    TPXParticle* tpx_particles = (TPXParticle*)(ALIGN_16((int)(particles + 1)));
+    TPXParticleS8* tpx_particles = (TPXParticleS8*)(ALIGN_16((int)(particles + 1)));
     particles->particles = tpx_particles;
     particles->particle_count = aligned_count;
     particles->particle_size = size->particle_size;
@@ -266,7 +290,7 @@ struct render_batch_element* render_batch_add_dynamic_particles(
     particles->particle_scale_height = size->particle_scale_height;
 
     if (aligned_count != count) {
-        TPXParticle* last = &tpx_particles[(aligned_count >> 1) - 1];
+        TPXParticleS8* last = &tpx_particles[(aligned_count >> 1) - 1];
         last->sizeB = 0;
     }
 
@@ -317,6 +341,30 @@ T3DMat4FP* render_batch_transformfp_from_full(struct render_batch* batch, struct
     return mtxfp;
 }
 
+T3DMat4FP* render_batch_transformfp_from_point(struct render_batch* batch, vector3_t* point) {
+    T3DMat4FP* mtxfp = render_batch_get_transformfp(batch);
+
+    if (!mtxfp) {
+        return NULL;
+    }
+    
+    mat4x4 mtx;
+    vector3_t scaled_point;
+    vector3Scale(point, &scaled_point, WORLD_SCALE);
+    matrixFromPosition(mtx, &scaled_point);
+    mtx[0][0] *= MODEL_WORLD_SCALE;
+    mtx[1][1] *= MODEL_WORLD_SCALE;
+    mtx[2][2] *= MODEL_WORLD_SCALE;
+    render_batch_relative_mtx(batch, mtx);
+    t3d_mat4_to_fixed_3x4(mtxfp, (T3DMat4*)mtx);
+
+    return mtxfp;
+}
+
+static inline bool render_batch_should_depth_sort(int sort_priority) {
+    return sort_priority == MAT_SORT_BACKGROUND || sort_priority == MAT_SORT_TRANSPARENT;
+} 
+
 int render_batch_compare_element(struct render_batch* batch, uint16_t a_index, uint16_t b_index) {
     struct render_batch_element* a = &batch->elements[a_index];
     struct render_batch_element* b = &batch->elements[b_index];
@@ -325,15 +373,31 @@ int render_batch_compare_element(struct render_batch* batch, uint16_t a_index, u
         return 0;
     }
 
+    if (a->type != b->type) {
+        return a->type - b->type;
+    }
+
     if (a->material->apply.sort_priority != b->material->apply.sort_priority) {
         return a->material->apply.sort_priority - b->material->apply.sort_priority;
+    }
+
+    if (render_batch_should_depth_sort(a->material->apply.sort_priority)) {
+        if (a->distance < b->distance) {
+            return 1;
+        }
+
+        return -1;
     }
 
     if (a->material != b->material) {
         return (int)a->material - (int)b->material;
     }
 
-    return a->type - b->type;
+    if (a->distance < b->distance) {
+        return -1;
+    }
+
+    return 1;
 }
 
 static bool element_type_2d[] = {
@@ -419,6 +483,8 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
         }
     }
 
+    fog_state_t fog_state = fog_get();
+
 #if ENABLE_PROFILE_render_batch
     int material_render_count = 0;
     int vertex_render_count = 0;
@@ -428,6 +494,8 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
     for (int i = 0; i < batch->element_count; ++i) {
         int index = order[i];
         struct render_batch_element* element = &batch->elements[index];
+
+        bool should_apply_scroll = false;
 
         if (current_mat != element->material) {
             if (element->material) {
@@ -441,7 +509,7 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
 
             current_mat = element->material;
         } else if (current_mat) {
-            material_apply_scroll(&current_mat->apply);
+            should_apply_scroll = true;
         }
 
         if (light_source != element->light_source) {
@@ -474,7 +542,7 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
                         t3d_segment_set(T3D_SEGMENT_SKELETON, attr->pose.pose);
                         break;
                     case ELEMENT_ATTR_IMAGE:
-                        rdpq_set_lookup_address(attr->offset+1, (void*)PhysicalAddr(attr->image.sprite->data));
+                        rdpq_set_lookup_address(attr->offset+1, (void*)PhysicalAddr(attr->image.data));
                         break;
                     case ELEMENT_ATTR_PRIM_COLOR:
                         rdpq_set_prim_register_raw(attr->color, 0, 0);
@@ -490,7 +558,7 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
                         }
                         transform_count = 1;
                         break;
-                    case ELEMENT_ATTR_SCROLL:
+                    case ELEMENT_ATTR_SCROLL_TEX0:
                         if (current_mat) {
                             struct material_tex* tex = &current_mat->apply.tex0;
                             rdpq_set_tile_size_fx(
@@ -498,6 +566,18 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
                                 attr->scroll.x + tex->s0, attr->scroll.y + tex->t0, 
                                 attr->scroll.x + tex->s1, attr->scroll.y + tex->t1
                             );
+                            should_apply_scroll = false;
+                        }
+                        break;
+                    case ELEMENT_ATTR_SCROLL_TEX1:
+                        if (current_mat) {
+                            struct material_tex* tex = &current_mat->apply.tex0;
+                            rdpq_set_tile_size_fx(
+                                TILE1, 
+                                attr->scroll.x + tex->s0, attr->scroll.y + tex->t0, 
+                                attr->scroll.x + tex->s1, attr->scroll.y + tex->t1
+                            );
+                            should_apply_scroll = false;
                         }
                         break;
                     case ELEMENT_ATTR_TRANSFORM_LIST: {
@@ -507,7 +587,22 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
                         transform_count = attr->offset;
                         break;
                     }
+                    case ELEMENT_ATTR_MAT_PLACEHOLDERS: {
+                        material_placeholder_block_t* placeholder = (material_placeholder_block_t*)((int)KSEG0_START_ADDR | attr->placeholders.addr);
+                        int count = attr->placeholders.count;
+
+                        for (int i = 0; i < count; i += 1) {
+                            rspq_block_set_placeholder((rspq_block_t*)i, placeholder->blocks[render_parity]);
+                            placeholder += 1;
+                        }
+                        break;
+                    }
                 }
+            }
+
+            if (current_mat && current_mat->apply.use_obj_fog) {
+                fog_apply_obj_fog(&fog_state, element->distance);
+                rdpq_set_fog_color(fog_state.color);
             }
 
             if (transform_count == 0 && default_mtx) {
@@ -517,6 +612,10 @@ void render_batch_finish(struct render_batch* batch, mat4x4 view_proj_matrix, T3
                     t3d_matrix_push(default_mtx);
                 }
                 transform_count = 1;
+            }
+
+            if (should_apply_scroll) {
+                material_apply_scroll(&current_mat->apply, scene_time);
             }
 
             rspq_block_run(element->mesh.block);      

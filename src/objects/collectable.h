@@ -12,8 +12,10 @@ struct collectable {
     struct renderable renderable;
     struct dynamic_object dynamic_object;
     enum collectable_type collectable_type;
-    uint16_t collectable_sub_type;
+    boolean_variable has_item;
 };
+
+typedef struct collectable collectable_t;
 
 void collectable_assets_load();
 

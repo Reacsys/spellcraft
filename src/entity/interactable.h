@@ -14,6 +14,8 @@ enum __attribute__ ((__packed__)) interact_type {
     INTERACT_TYPE_OPEN,
     INTERACT_TYPE_CAST,
     INTERACT_TYPE_CHECK,
+    INTERACT_TYPE_UNLOCK,
+    INTERACT_TYPE_TAKE,
 };
 
 #define MAX_INTERACT_RANGE  2.0f
@@ -26,6 +28,7 @@ typedef void (*interaction_callback)(struct interactable* interactable, entity_i
 
 struct interactable_flags {
     uint16_t target_straight_on: 1;
+    uint16_t thrown: 1;
 };
 
 struct interactable {

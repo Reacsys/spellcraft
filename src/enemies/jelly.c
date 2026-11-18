@@ -13,6 +13,7 @@
 #include "../time/time.h"
 #include "../entity/entity_spawner.h"
 #include "../audio/audio.h"
+#include "../physics/launch_at.h"
 #include "vision.h"
 
 #define MAX_HEALTH      400.0f
@@ -24,15 +25,18 @@
 
 #define FREEZE_TIME     1.0f
 
-#define JUMP_INTERVAL   2.0f
+#define JUMP_INTERVAL   1.0f
 #define JUMP_IMPULSE         4.0f
-#define JUMP_SIDE_IMPULSE    2.0f
-#define JUMP_WINDUP     0.9f
+#define JUMP_SIDE_IMPULSE    4.0f
+#define JUMP_WINDUP     0.25f
 #define JUMP_TIME       0.2f
 
-#define VISION_DISTANCE 8.0f
+#define VISION_DISTANCE             8.0f
+#define CYLINDER_VISION_DISTANCE    4.0f
 
 #define SCALE_CHANGE_RATE   0.05f
+
+#define DEFAULT_LAUNCH_SPEED    6.0f
 
 static wav64_t* jump_sound;
 static tmesh_t* mesh;
@@ -47,6 +51,7 @@ static struct dynamic_object_type jelly_collider = {
     // about a 40 degree slope
     .max_stable_slope = 0.219131191f,
     .center = {0.0f, 1.0f, 0.0f},
+    .density = DYNAMIC_DENSITY_NEUTRAL,
 };
 
 static struct dynamic_object_type jelly_ice_collider = {
@@ -55,6 +60,7 @@ static struct dynamic_object_type jelly_ice_collider = {
     .bounce = 0.1f,
     .max_stable_slope = 0.0f,
     .center = {0.0f, 1.0f, 0.0f},
+    .density = DYNAMIC_DENSITY_MEDIUM,
 };
 
 static struct spatial_trigger_type jelly_vision_type = {
@@ -64,6 +70,7 @@ static struct spatial_trigger_type jelly_vision_type = {
             .radius = VISION_DISTANCE,
             .half_height = VISION_DISTANCE,
             .angle = {SQRT_1_2, SQRT_1_2},
+            .cylinder_radius = CYLINDER_VISION_DISTANCE,
         },
     },
 };
@@ -77,14 +84,12 @@ void jelly_freeze(struct jelly* jelly) {
     jelly->is_frozen = 1;
     jelly->freeze_timer = 0.0f;
     jelly->collider.type = &jelly_ice_collider;
-    jelly->collider.density_class = DYNAMIC_DENSITY_MEDIUM;
 }
 
 void jelly_thaw(struct jelly* jelly) {
     jelly->is_frozen = 0;
     jelly->freeze_timer = 0.0f;
     jelly->collider.type = &jelly_collider;
-    jelly->collider.density_class = DYNAMIC_DENSITY_NEUTRAL;
 }
 
 float jelly_recalc_radius(struct jelly* jelly) {
@@ -137,6 +142,10 @@ void jelly_update_handle_damage(struct jelly* jelly, bool is_grounded) {
 }
 
 void jelly_update_target(struct jelly* jelly, struct Vector3* jump_target, bool is_grounded) {
+    if (jelly->vision.active_contacts) {
+        dynamic_object_wake(&jelly->collider);
+    }
+
     if (!is_grounded) {
         jelly->jump_timer = 0.0f;
         *jump_target = gZeroVec;
@@ -158,18 +167,17 @@ void jelly_update_target(struct jelly* jelly, struct Vector3* jump_target, bool 
         return;
     }
 
-    if (jelly->jump_timer == 0.0f) {
-        struct Vector2 target_rotation;
-        vector2LookDir(&target_rotation, &offset);
-        vector2RotateTowards(&jelly->transform.rotation, 
-                &target_rotation, 
-                &jelly_max_rotation, 
-                &jelly->transform.rotation
-        );
-        if (vector2Dot(&jelly->transform.rotation, &target_rotation) < 0.9f) {
-            *jump_target = gZeroVec;
-            return;
-        }
+    struct Vector2 target_rotation;
+    vector2LookDir(&target_rotation, &offset);
+    vector2RotateTowards(&jelly->transform.rotation, 
+            &target_rotation, 
+            &jelly_max_rotation, 
+            &jelly->transform.rotation
+    );
+    if (jelly->jump_timer <= 0.0f &&
+         vector2Dot(&jelly->transform.rotation, &target_rotation) < 0.9f) {
+        *jump_target = gZeroVec;
+        return;
     }
 
     vector2ToLookDir(&jelly->transform.rotation, jump_target);
@@ -178,7 +186,7 @@ void jelly_update_target(struct jelly* jelly, struct Vector3* jump_target, bool 
         jelly->collider.velocity.x += JUMP_SIDE_IMPULSE * jump_target->x;
         jelly->collider.velocity.y += JUMP_IMPULSE;
         jelly->collider.velocity.z += JUMP_SIDE_IMPULSE * jump_target->z;
-        jelly->jump_timer = 0.0f;
+        jelly->jump_timer = randomInRangef(-0.5f, 0.0f);
         jelly->is_jumping = 1;
         jelly->is_attacking = 1;
         
@@ -316,6 +324,10 @@ void jelly_update(void* data) {
     if (jelly->transform.scale <= 0.0f) {
         entity_despawn(jelly->health.entity_id);
     }
+
+    if (jelly->collider.collision_group && jelly->collider.velocity.y < 0.0f) {
+        jelly->collider.collision_group = 0;
+    }
 }
 
 void jelly_init(struct jelly* jelly, struct jelly_definition* definition, entity_id id) {
@@ -345,7 +357,6 @@ void jelly_init(struct jelly* jelly, struct jelly_definition* definition, entity
         &jelly->transform.rotation
     );
 
-    jelly->collider.density_class = DYNAMIC_DENSITY_NEUTRAL;
     jelly->collider.scale = jelly_recalc_radius(jelly);
     jelly->target_radius = jelly->collider.scale;
     jelly->transform.scale = jelly->collider.scale;
@@ -394,15 +405,42 @@ void jelly_common_destroy() {
     tmesh_cache_release(ice_mesh);
 }
 
-void jelly_launch_attack(struct jelly* jelly, struct Vector3* velocity, int collision_group, entity_id target) {
+void jelly_launch_attack(struct jelly* jelly, struct Vector3* velocity, entity_id target, uint16_t collision_group) {
     jelly->collider.velocity = *velocity;
+    dynamic_object_wake(&jelly->collider);
     jelly->jump_timer = 0.0f;
     jelly->is_jumping = 1;
     jelly->is_attacking = 1;
-    jelly->collider.collision_group = collision_group;
     jelly->current_target = target;
+    jelly->collider.collision_group = collision_group;
 }
 
 void jelly_reset_collision_group(struct jelly* jelly) {
     jelly->collider.collision_group = 0;
+}
+
+entity_id jelly_launch_at(vector3_t* from, vector3_t* offset, entity_id to_target, uint16_t collision_group) {
+    struct jelly_definition definition;
+    definition.position = *from;
+
+    vector2_t rotation;
+    vector2LookDir(&definition.rotation, offset);
+
+    entity_id result = entity_spawn(ENTITY_TYPE_jelly, &definition);
+
+    if (!result) {
+        return result;
+    }
+
+    struct Vector3 attack_velocity;
+    phys_launch_at(from, offset, 3.0f, &attack_velocity);
+    
+    jelly_launch_attack(
+        entity_get(result), 
+        &attack_velocity, 
+        to_target,
+        collision_group
+    );
+
+    return result;
 }

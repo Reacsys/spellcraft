@@ -109,22 +109,17 @@ void elemental_sword_init(struct elemental_sword* elemental_sword, struct spell_
 
     elemental_sword->has_animation = spell_data_source_request_animation(source, elemental_sword->definition->animation);
 
+    if (elemental_sword->has_animation) {
+        source->flags.source = SPELL_CAST_SOURCE_STAFF;
+    }
+
     render_scene_add(&source->position, 1.0f, elemental_sword_render, elemental_sword);
 
     elemental_sword->mesh = element_type == ELEMENT_TYPE_ICE ? spell_assets_get()->ice_sword : spell_assets_get()->fire_sword;
 
-    elemental_sword->trail = sword_trail_new(elemental_sword->definition->color);
+    elemental_sword->trail = sword_trail_new(spell_assets_get()->sword_trail_material);
 
-    elemental_sword->collider_type = (struct dynamic_object_type){
-        .minkowsi_sum = swing_shape_minkowski_sum,
-        .bounding_box = swing_shape_bounding_box,
-        .data = {
-            .swing = {
-                .shape = &elemental_sword->swing_shape,
-            },
-        },
-    };
-    swing_shape_init(&elemental_sword->swing_shape);
+    swing_shape_init(&elemental_sword->swing_shape, &elemental_sword->collider_type);
 
     dynamic_object_init(
         entity_id, 
@@ -136,6 +131,7 @@ void elemental_sword_init(struct elemental_sword* elemental_sword, struct spell_
     );
 
     elemental_sword->collider.trigger_type = TRIGGER_TYPE_OVERLAP;
+    dynamic_object_wake(&elemental_sword->collider);
 
     collision_scene_add(&elemental_sword->collider);
 
@@ -159,6 +155,8 @@ bool elemental_sword_update(struct elemental_sword* elemental_sword, struct spel
         elemental_sword->power_ratio = mana_pool_request_ratio(&spell_sources->mana_pool, elemental_sword->definition->mana_cost);
         elemental_sword->needs_mana_check = 0;
     }
+    
+    dynamic_object_wake(&elemental_sword->collider);
 
     bool is_active = false;
     bool is_attacking = false;

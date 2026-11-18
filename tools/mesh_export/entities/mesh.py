@@ -3,8 +3,10 @@ import mathutils
 import struct
 import bmesh
 import math
+from typing import NamedTuple
 
 from . import armature
+from . import material_extract
 
 def interpolate_color(a, b, lerp):
     lerp_inv = 1 - lerp
@@ -15,18 +17,25 @@ def interpolate_color(a, b, lerp):
         a[3] * lerp_inv + b[3] * lerp
     ]
 
-def interpolate_vertex(a, b, lerp):
+class vertex_data(NamedTuple):
+    position: mathutils.Vector
+    normal: mathutils.Vector
+    color: list[float]
+    uv: mathutils.Vector | list[float]
+    bone_index: int
+
+def interpolate_vertex(a: vertex_data, b: vertex_data, lerp: float) -> vertex_data:
     lerp_inv = 1 - lerp
-    return (
-        a[0] * lerp_inv + b[0] * lerp,
-        a[1] * lerp_inv + b[1] * lerp,
-        interpolate_color(a[2], b[2], lerp),
-        a[3] * lerp_inv + b[3] * lerp,
-        a[4] # just copy over the first bone
+    return vertex_data(
+        position=a.position * lerp_inv + b.position * lerp,
+        normal=a.normal * lerp_inv + b.normal * lerp,
+        color=interpolate_color(a.color, b.color, lerp),
+        uv=mathutils.Vector(a.uv) * lerp_inv + mathutils.Vector(b.uv) * lerp,
+        bone_index=a.bone_index, # just copy over the first bone
     )
 
 class mesh_data():
-    def __init__(self, mat: bpy.types.Material | None) -> None:
+    def __init__(self, mat: bpy.types.Material | None, placeholder_index: int | None = None) -> None:
         self.mat: bpy.types.Material | None = mat
         self.vertices: list[mathutils.Vector] = []
         self.normals: list = []
@@ -35,6 +44,8 @@ class mesh_data():
         self.bone_indices: list = []
         
         self.indices: list[int] = []
+
+        self.placeholder_index: int | None = placeholder_index
 
     def copy(self):
         result = mesh_data(self.mat)
@@ -45,6 +56,7 @@ class mesh_data():
         result.uv = self.uv.copy()
         result.indices = self.indices.copy()
         result.bone_indices = self.bone_indices.copy()
+        result.placeholder_index = self.placeholder_index
 
         return result
     
@@ -63,7 +75,9 @@ class mesh_data():
         return len(self.indices) == 0
     
     def copy_blank(self):
-        return mesh_data(self.mat)
+        result = mesh_data(self.mat)
+        result.placeholder_index = self.placeholder_index
+        return result
     
     def translate(self, offset: mathutils.Vector):
         for i in range(len(self.vertices)):
@@ -73,12 +87,12 @@ class mesh_data():
         for i in range(len(self.vertices)):
             self.vertices[i] = self.vertices[i] * scale
 
-    def append_vertex(self, vertex_data):
-        self.vertices.append(vertex_data[0])
-        self.normals.append(vertex_data[1])
-        self.color.append(vertex_data[2])
-        self.uv.append(vertex_data[3])
-        self.bone_indices.append(vertex_data[4])
+    def append_vertex(self, vertex: vertex_data):
+        self.vertices.append(vertex.position)
+        self.normals.append(vertex.normal)
+        self.color.append(vertex.color)
+        self.uv.append(vertex.uv)
+        self.bone_indices.append(vertex.bone_index)
 
     def append_triangle(self, a: int, b: int, c: int):
         self.indices.append(a)
@@ -86,7 +100,7 @@ class mesh_data():
         self.indices.append(c)
 
     
-    def append_mesh_data(self, other):
+    def append_mesh_data(self, other: 'mesh_data'):
         start_index = len(self.vertices)
 
         self.vertices += other.vertices
@@ -104,10 +118,16 @@ class mesh_data():
 
         return result
 
-    def get_vertex(self, index):
-        return (self.vertices[index], self.normals[index], self.color[index], self.uv[index], self.bone_indices[index])
+    def get_vertex(self, index: int) -> vertex_data:
+        return vertex_data(
+            position=self.vertices[index],
+            normal=self.normals[index],
+            color=self.color[index],
+            uv=self.uv[index],
+            bone_index=self.bone_indices[index],
+        )
     
-    def get_vertex_interpolated(self, a, b, lerp):
+    def get_vertex_interpolated(self, a: int, b: int, lerp: float) -> vertex_data:
         return interpolate_vertex(self.get_vertex(a), self.get_vertex(b), lerp)
     
     def center(self) -> mathutils.Vector:
@@ -132,7 +152,18 @@ class mesh_data():
 
         return [min_result, max_result]
 
-    def append_mesh(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, material_index: int, final_transform: mathutils.Matrix, armature: armature.ArmatureData | None):
+    def get_radius(self) -> float:
+        result: float = 0
+
+        for vertex in self.vertices:
+            test_result = vertex.dot(vertex)
+
+            if test_result > result:
+                result = test_result
+
+        return math.sqrt(result)
+
+    def append_mesh(self, obj: bpy.types.Object | None, mesh: bpy.types.Mesh, material_index: int, final_transform: mathutils.Matrix, armature: armature.ArmatureData | None):
         triangles = []
         max_index = -1
         used_indices = set()
@@ -142,7 +173,7 @@ class mesh_data():
         normal_transform.transpose()
         bone_index = -1
 
-        if obj.parent_bone and armature:
+        if obj and obj.parent_bone and armature:
             bone = armature.find_bone_data(obj.parent_bone)
             final_transform = bone.pose_bone.matrix.inverted() @ obj.matrix_world
             normal_transform = final_transform.to_3x3().inverted().transposed()
@@ -201,7 +232,7 @@ class mesh_data():
             group_index = None
             bone = None
 
-            if not armature is None and not obj.parent_bone:
+            if obj and not armature is None and not obj.parent_bone:
                 group_index = -1
                 group_weight = 0
 
@@ -303,10 +334,16 @@ def pack_vertex(vertex, uv, color, normal, bone_index, gamma = 1):
     return result
 
 class mesh_list_entry:
-    def __init__(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, transform: mathutils.Matrix):
-        self.obj: bpy.types.Object = obj
+    def __init__(self, obj: bpy.types.Object | None, mesh: bpy.types.Mesh, transform: mathutils.Matrix):
+        self.obj: bpy.types.Object | None = obj
         self.mesh: bpy.types.Mesh = mesh
         self.transform: mathutils.Matrix = transform
+
+class room_mesh_block:
+    def __init__(self):
+        self.center: mathutils.Vector = mathutils.Vector()
+        self.priority: int = 1
+        self.mesh_data: list[list[mesh_data]] = []
 
 class mesh_list():
     def __init__(self, base_transform: mathutils.Matrix) -> None:
@@ -321,6 +358,46 @@ class mesh_list():
         bm.to_mesh(mesh)
         bm.free()
         self.meshes.append(mesh_list_entry(obj, mesh, self.base_transform @ obj.matrix_world))
+
+    def generate_mesh_data_by_order(self, armature: armature.ArmatureData | None = None) -> list[list[mesh_data]]:
+        blocks: list[room_mesh_block] = []
+
+        for entry in self.meshes:
+            mesh = entry.mesh
+            transform = entry.transform
+
+            curr = room_mesh_block()
+            blocks.append(curr)
+
+            for material_index in range(max(len(mesh.materials), 1)):
+                mat = mesh.materials[material_index]
+
+                if mat == None:
+                    continue
+
+                parsed_mat = material_extract.load_material_with_name(mat)
+
+                if material_index == 0 and parsed_mat.priority != None:
+                    curr.priority = parsed_mat.priority
+
+                if parsed_mat.does_scroll() or len(curr.mesh_data) == 0:
+                    curr.mesh_data.append([])
+
+                curr_mesh = mesh_data(
+                    mat,
+                    placeholder_index = armature.find_placeholder_index(entry.obj) if armature else None
+                )
+                curr_mesh.append_mesh(entry.obj, mesh, material_index, transform, armature)
+                curr.mesh_data[-1].append(curr_mesh)
+
+        blocks.sort(key=lambda x: x.priority)
+
+        result: list[list[mesh_data]] = []
+
+        for entry in blocks:
+            result += entry.mesh_data
+
+        return result
 
     def determine_mesh_data(self, armature: armature.ArmatureData | None = None) -> list[mesh_data]:
         mesh_by_material: dict[str, mesh_data] = dict()
@@ -341,7 +418,8 @@ class mesh_list():
                     continue
 
                 if not name in mesh_by_material:
-                    mesh_by_material[name] = mesh_data(mat)
+                    placeholder_index=armature.find_placeholder_index(entry.obj) if armature else None
+                    mesh_by_material[name] = mesh_data(mat, placeholder_index=placeholder_index)
 
                 mesh_data_instance = mesh_by_material[name]
 

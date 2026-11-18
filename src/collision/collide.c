@@ -134,12 +134,37 @@ bool collide_object_to_triangle(void* data, int triangle_index, int collision_la
     struct EpaResult result;
 
     if (epaSolve(
-        &simplex, 
-        &collide_data->triangle, 
-        mesh_triangle_minkowski_sum, 
-        collide_data->object, 
-        dynamic_object_minkowski_sum, 
-        &result)) {
+            &simplex, 
+            &collide_data->triangle, 
+            mesh_triangle_minkowski_sum, 
+            collide_data->object, 
+            dynamic_object_minkowski_sum, 
+            &result
+        )
+    ) {
+        if (!mesh_triangle_filter_edge_contacts(
+            &collide_data->triangle.triangle, 
+            collide_data->triangle.vertices,
+            &result.normal
+        )) {
+            vector3_t a;
+            vector3_t b;
+            uint16_t* indices = collide_data->triangle.triangle.indices;
+            vector3_t* vertices = collide_data->triangle.vertices;
+            vector3Sub(&vertices[indices[1]], &vertices[indices[0]], &a);
+            vector3Sub(&vertices[indices[2]], &vertices[indices[0]], &b);
+
+            vector3_t new_normal;
+            vector3Cross(&a, &b, &new_normal);
+            vector3Normalize(&new_normal, &new_normal);
+
+            if (vector3Dot(&new_normal, &result.normal) < 0.0f) {
+                vector3Negate(&new_normal, &result.normal);
+            } else {
+                result.normal = new_normal;
+            }
+        }
+
         enum surface_type surface_type = collide_data->triangle.triangle.surface_type;
         correct_overlap(
             collide_data->object, 
@@ -171,6 +196,8 @@ void collide_object_to_mesh(struct dynamic_object* object, struct mesh_collider*
 void collide_adjust_collision(struct dynamic_object* object, struct EpaResult* result, struct Vector3* momentum_center, struct Vector3* relative_velocity, float factor) {
     if (!object->is_fixed) {
         vector3AddScaled(object->position, &result->normal, result->penetration * factor, object->position);
+        object->is_sleeping = 0;
+        object->sleep_counter = 0;
 
         if (relative_velocity) {
             vector3AddScaled(momentum_center, relative_velocity, factor, &object->velocity);
@@ -187,7 +214,7 @@ void collide_object_to_object(struct dynamic_object* a, struct dynamic_object* b
         return;
     }
 
-    if (a->trigger_type != 0 && b->trigger_type != 0) {
+    if (a->trigger_type != TRIGGER_TYPE_NONE && b->trigger_type != TRIGGER_TYPE_NONE) {
         return;
     }
 

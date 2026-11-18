@@ -3,12 +3,14 @@
 
 #include "util/init.h"
 #include "test/framework_test.h"
+#include "savefile/savefile.h"
 
 void test_menu_microcode(struct test_context* t);
 void test_collide_object_swept_to_triangle(struct test_context* t);
 void test_collide_object_to_mesh_swept(struct test_context* t);
 void test_collision_scene_collide_single(struct test_context* t);
 void test_collision_scene_collide(struct test_context* t);
+void test_collision_remove_duplicate_contacts(test_context_t* t);
 void test_ring_malloc(struct test_context* t);
 void test_training_dummy(struct test_context* t);
 void test_sweep_minkowski_sum(struct test_context* t);
@@ -26,9 +28,14 @@ void test_kd_tree_lookup(struct test_context* t);
 void test_hash_map(struct test_context* t);
 void test_memory_leaks(struct test_context* t);
 void test_resource_cache(struct test_context* t);
+void test_resource_swap(struct test_context* t);
 void test_cutscene_runner(struct test_context* t);
+void test_mesh_triangle_shadow_cast(struct test_context* t);
 
 #define DEBUG_CONNECT_DELAY     TICKS_FROM_MS(5000)
+
+void* zbuffer_data;
+uint8_t blur_frame_counter;
 
 int main() {
     rdpq_init();
@@ -41,10 +48,21 @@ int main() {
     long long start_time = timer_ticks();
     while (timer_ticks() - start_time < DEBUG_CONNECT_DELAY);
 
+    // scenes read globals from the save file when loading
+    savefile_new();
     init_engine();
 
     console_init();
     console_set_render_mode(RENDER_MANUAL);
+
+    // pure unit tests first so a crash loading a scene doesn't hide them
+    test_run(test_resource_cache);
+    test_run(test_resource_swap);
+    test_run(test_hash_map);
+    test_run(test_ring_malloc);
+    test_run(test_matrix_inverse);
+
+    test_run(test_mesh_triangle_shadow_cast);
 
     test_run(test_menu_microcode);
 
@@ -57,15 +75,12 @@ int main() {
 
     test_run(test_collision_scene_collide_single);
     test_run(test_collision_scene_collide);
-
-    test_run(test_ring_malloc);
+    test_run(test_collision_remove_duplicate_contacts);
 
     test_run(test_training_dummy);
 
     test_run(test_sweep_minkowski_sum);
     test_run(test_sweep_bounding_box);
-
-    test_run(test_matrix_inverse);
 
     test_run(test_overworld_create_top_view);
 
@@ -76,16 +91,13 @@ int main() {
     test_run(test_cylinder_horz_bounding_box);
     test_run(test_sphere_minkowski_sum);
     test_run(test_cone_minkowski_sum);
-    test_run(test_cone_minkowski_sum);
     test_run(test_cone_bounding_box);
     
-    test_run(test_hash_map);
-
-    // test_run(test_memory_leaks);
-
-    test_run(test_resource_cache);
+    test_run(test_memory_leaks);
 
     test_report_failures();
+
+    debugf("TESTS DONE\n");
 
     return 0;
 }

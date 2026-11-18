@@ -14,17 +14,21 @@ static float interaction_range[] = {
     [INTERACT_TYPE_OPEN] = 0.85f,
     [INTERACT_TYPE_CAST] = 0.0f,
     [INTERACT_TYPE_CHECK] = 2.0f,
+    [INTERACT_TYPE_UNLOCK] = 2.0f,
+    [INTERACT_TYPE_TAKE] = 0.85f,
 };
 
 static const char* interaction_names[] = {
     [INTERACT_TYPE_NONE] = NULL,
     [INTERACT_TYPE_TALK] = "Talk",
     [INTERACT_TYPE_READ] = "Read",
-    [INTERACT_TYPE_PICKUP] = "Lift",
+    [INTERACT_TYPE_PICKUP] = "Pickup",
     [INTERACT_TYPE_DROP] = "Drop",
     [INTERACT_TYPE_OPEN] = "Open",
     [INTERACT_TYPE_CAST] = "Cast",
     [INTERACT_TYPE_CHECK] = "Check",
+    [INTERACT_TYPE_UNLOCK] = "Unlock",
+    [INTERACT_TYPE_TAKE] = "Take",
 };
 
 void interactable_reset() {
@@ -39,7 +43,7 @@ void interactable_init(struct interactable* interactable, entity_id id, interact
     interactable->data = data;
     hash_map_set(&interactable_entity_mapping, id, interactable);
     
-    interactable->flags.target_straight_on = false;
+    interactable->flags = (struct interactable_flags){};
 }
 
 void interactable_destroy(struct interactable* interactable) {

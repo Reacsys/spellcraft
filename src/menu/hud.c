@@ -12,10 +12,16 @@
 #include "../font/fonts.h"
 #include "../render/defs.h"
 #include "../scene/scene.h"
+#include "button_icons.h"
+#include "../math/mathf.h"
+
+#define HEALTH_GROW_RATE        30.0f
+#define HEALTH_CHANGE_DELAY     15
 
 #define SCREEN_EDGE_MARGIN      20.0f
 #define TEXT_PADDING            2
-#define BOX_HEIGHT              10
+#define BOX_HEIGHT              16
+#define BUTTON_ICON_SPACE       18
 
 #define SPELL_SLOT_LOCATION_X   232
 #define SPELL_SLOT_LOCATION_Y   152
@@ -27,10 +33,10 @@
 #define MANA_TO_SIZE(mana)  (int)((mana) * MANA_WIDTH_RATIO)
 
 #define MANA_BAR_X              24
-#define MANA_BAR_Y              28
-#define MANA_BAR_HEIGHT         4
+#define MANA_BAR_Y              (240-20-4)
+#define MANA_BAR_HEIGHT         2
 
-#define HEALTH_BAR_Y            20
+#define HEALTH_BAR_Y            (240-20-10)
 
 #define BUTTON_ICON_X           258
 #define BUTTON_ICON_Y           30
@@ -39,25 +45,16 @@
 #define BOSS_HEALTH_WIDTH       260
 #define BOSS_HEALTH_Y           20
 
-static color_t mana_color = {80, 0, 240, 200};
+static color_t mana_color = {60, 240, 20, 200};
 static color_t health_color = {240, 80, 0, 200};
 
-int measure_text(enum font_type font, const char* message) {
-    const char* curr = message;
-
-    int result = 0;
-
-    while (*curr) {
-        rdpq_font_gmetrics_t metrics;
-        bool was_found = rdpq_font_get_glyph_metrics(font_get(font), *curr, &metrics);
-        ++curr;
-
-        if (was_found) {
-            result += metrics.xadvance;
-        }
-    }
-    
-    return result;
+void hud_status_bar_init(status_bar_state_t* status, float current, float max) {
+    *status = (status_bar_state_t) {
+        .last_max = max,
+        .last_value = current,
+        .max_delay = HEALTH_CHANGE_DELAY,
+        .value_delay = HEALTH_CHANGE_DELAY,
+    };
 }
 
 void hud_render_interaction_preview(struct hud* hud) {
@@ -86,9 +83,10 @@ void hud_render_interaction_preview(struct hud* hud) {
     vector2_t screen_pos;
     vector3_t pos = *obj->position;
     pos.y = (obj->bounding_box.max.y + obj->bounding_box.min.y) * 0.5f;
-    camera_screen_from_position(hud->camera, &pos, &screen_pos);
+    camera_screen_from_position(&hud->player->camera_controller.camera, &pos, &screen_pos);
 
-    int box_width = measure_text(FONT_DIALOG, interaction_name);
+    int text_len = strlen(interaction_name);
+    int box_width = measure_text(FONT_DIALOG, interaction_name, text_len);
 
     screen_pos.x -= box_width >> 1;
 
@@ -106,7 +104,7 @@ void hud_render_interaction_preview(struct hud* hud) {
     rdpq_texture_rectangle(
         TILE0, 
         screen_pos.x - TEXT_PADDING, screen_pos.y - BOX_HEIGHT - TEXT_PADDING, 
-        screen_pos.x + box_width + TEXT_PADDING, screen_pos.y + TEXT_PADDING,
+        screen_pos.x + box_width + TEXT_PADDING + BUTTON_ICON_SPACE, screen_pos.y + TEXT_PADDING,
         0, 0
     );
     rdpq_sync_pipe();
@@ -120,10 +118,12 @@ void hud_render_interaction_preview(struct hud* hud) {
             .wrap = WRAP_NONE,
         }, 
         FONT_DIALOG, 
-        screen_pos.x, screen_pos.y, 
+        screen_pos.x + BUTTON_ICON_SPACE, screen_pos.y - 4, 
         interaction_name,
-        strlen(interaction_name)
+        text_len
     );
+
+    button_icon_draw(BUTTON_TYPE_A, screen_pos.x, screen_pos.y - BOX_HEIGHT);
 }
 
 void hud_draw_bar(int max_width, int current_width, int prev_width, int y, color_t color) {
@@ -143,7 +143,7 @@ void hud_draw_bar(int max_width, int current_width, int prev_width, int y, color
         0, 0
     );
     if (current_width < prev_width) {
-        rdpq_set_prim_color((color_t){220, 100, 0, 200});
+        rdpq_set_prim_color((color_t){60, 10, 0, 200});
         rdpq_texture_rectangle(
             TILE0, 
             MANA_BAR_X + current_width, y, 
@@ -182,6 +182,57 @@ void hud_render_boss_name(hud_t* hud) {
     );
 }
 
+
+void hud_status_render(status_bar_state_t* status, float max, float value, float y, color_t color) {
+    if (status->last_max != max) {
+        if (status->max_delay) {
+            --status->max_delay;
+        } else {
+            status->last_max = mathfMoveTowards(
+                status->last_max,
+                max,
+                fixed_time_step * HEALTH_GROW_RATE
+            );
+        }
+    } else {
+        status->max_delay = HEALTH_CHANGE_DELAY;
+    }
+
+    if (status->last_value < value) {
+        status->last_value = value;
+    } else if (status->last_value == value) {
+        status->value_delay = HEALTH_CHANGE_DELAY;
+    } else {
+        if (status->value_delay) {
+            --status->value_delay;
+        } else {
+            status->last_value = mathfMoveTowards(
+                status->last_value,
+                value,
+                fixed_time_step * HEALTH_GROW_RATE
+            );
+        }
+    }
+
+    if (value > status->last_max) {
+        value = status->last_max;
+    }
+
+    float last_value = status->last_value;
+
+    if (last_value > status->last_max) {
+        last_value = status->last_max;
+    }
+
+    hud_draw_bar(
+        MANA_TO_SIZE(status->last_max),
+        MANA_TO_SIZE(value),
+        MANA_TO_SIZE(last_value),
+        y,
+        color
+    );
+}
+
 void hud_render(void *data) {
     if (!update_has_layer(UPDATE_LAYER_WORLD)) {
         return;
@@ -191,19 +242,19 @@ void hud_render(void *data) {
 
     hud_render_boss_name(hud);
 
-    hud_draw_bar(
-        MANA_TO_SIZE(spell_exec_max_mana(&hud->player->spell_exec)),
-        MANA_TO_SIZE(spell_exec_current_mana(&hud->player->spell_exec)),
-        MANA_TO_SIZE(spell_exec_prev_mana(&hud->player->spell_exec)),
+    hud_status_render(
+        &hud->mana,
+        spell_exec_max_mana(&hud->player->spell_exec),
+        spell_exec_current_mana(&hud->player->spell_exec),
         MANA_BAR_Y,
         mana_color
     );
 
-    hud_draw_bar(
-        MANA_TO_SIZE(hud->player->health.max_health),
-        MANA_TO_SIZE(hud->player->health.current_health),
-        MANA_TO_SIZE(0),
-        HEALTH_BAR_Y,
+    hud_status_render(
+        &hud->health, 
+        hud->player->health.max_health, 
+        hud->player->health.current_health, 
+        HEALTH_BAR_Y, 
         health_color
     );
 
@@ -214,15 +265,19 @@ void hud_render(void *data) {
     hud_render_interaction_preview(hud);
 }
 
-void hud_init(struct hud* hud, struct player* player, camera_t* camera) {
+void hud_init(struct hud* hud, struct player* player) {
     menu_add_callback(hud_render, hud, MENU_PRIORITY_HUD);
     hud->player = player;
-    hud->camera = camera;
     live_cast_renderer_init(&hud->live_cast_renderer, &player->live_cast);
     font_type_use(FONT_DIALOG);
     hud->boss = (struct hud_boss){};
     
     hud->assets.overlay_material = material_cache_load("rom:/materials/menu/solid_primitive.mat");
+    button_icon_load(BUTTON_TYPE_A);
+
+    hud_status_bar_init(&hud->health, player->health.current_health, player->health.max_health);
+    mana_pool_t* pool = spell_exec_get_pool(&player->spell_exec);
+    hud_status_bar_init(&hud->mana, pool->max_mana, pool->current_mana);
 }
 
 void hud_destroy(struct hud* hud) {
@@ -231,6 +286,7 @@ void hud_destroy(struct hud* hud) {
     font_type_release(FONT_DIALOG);
     
     material_cache_release(hud->assets.overlay_material);
+    button_icon_unload(BUTTON_TYPE_A);
 }
 
 void hud_show_boss_health(struct hud* hud, const char* name, entity_id id) {

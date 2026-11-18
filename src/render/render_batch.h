@@ -34,7 +34,7 @@ struct render_batch_particle_size {
 };
 
 struct render_batch_particles {
-    TPXParticle* particles;
+    TPXParticleS8* particles;
     uint16_t particle_count;
     // particle_size = WORLD_SCALE is a radius of 1
     // when particle_scale = 0xFFFF and particle_size = 127
@@ -57,7 +57,9 @@ enum element_attr_type {
     ELEMENT_ATTR_ENV_COLOR,
     ELEMENT_ATTR_TRANSFORM,
     ELEMENT_ATTR_TRANSFORM_LIST,
-    ELEMENT_ATTR_SCROLL,
+    ELEMENT_ATTR_SCROLL_TEX0,
+    ELEMENT_ATTR_SCROLL_TEX1,
+    ELEMENT_ATTR_MAT_PLACEHOLDERS,
 };
 
 struct element_attr {
@@ -68,7 +70,7 @@ struct element_attr {
             T3DMat4FP* pose;
         } pose;
         struct {
-            sprite_t* sprite;
+            void* data;
         } image;
         color_t color;
         T3DMat4FP* transform;
@@ -76,6 +78,10 @@ struct element_attr {
         struct {
             int16_t x, y;
         } scroll;
+        struct {
+            uint32_t count: 8;
+            uint32_t addr: 24;   
+        } placeholders;
     };
 };
 
@@ -94,6 +100,7 @@ static inline element_attr_t element_attr_end() {
 
 struct render_batch_element {
     material_pair_t* material;
+    float distance;
     uint16_t type;
     uint8_t light_source;
     union {
@@ -123,6 +130,7 @@ struct render_batch {
     struct frame_memory_pool* pool;
     struct render_batch_element elements[RENDER_BATCH_MAX_SIZE];
     short element_count;
+    vector3_t* curr_pos;
 };
 
 typedef struct render_batch render_batch_t;
@@ -161,6 +169,7 @@ mat4x4* render_batch_get_transform(struct render_batch* batch);
 T3DMat4FP* render_batch_get_transformfp(struct render_batch* batch);
 T3DMat4FP* render_batch_transformfp_from_sa(struct render_batch* batch, struct TransformSingleAxis* transform);
 T3DMat4FP* render_batch_transformfp_from_full(struct render_batch* batch, struct Transform* transform);
+T3DMat4FP* render_batch_transformfp_from_point(struct render_batch* batch, vector3_t* point);
 T3DMat4FP* render_batch_build_pose(T3DMat4* pose, int bone_count, frame_memory_pool_t* pool);
 
 void render_batch_relative_mtx(struct render_batch* batch, mat4x4 into);

@@ -8,6 +8,9 @@
 #include "../config.h"
 #include "../util/rspq.h"
 #include "../ext/libdragon.h"
+#include "../math/mathf.h"
+#include "../util/lerp.h"
+#include "render.h"
 
 void material_init(struct material* material) {
     material->block = 0;
@@ -17,37 +20,40 @@ void material_init(struct material* material) {
     material->tex0.texture_enabled = false;
     material->tex0.num_frames = 0;
     material->tex0.frames = NULL;
+    material->tex0.use_placeholder = false;
 
     material->tex1.sprite = NULL;
     material->tex1.texture_enabled = false;
     material->tex1.num_frames = 0;
     material->tex1.frames = NULL;
+    material->tex1.use_placeholder = false;
 
-    material->sort_priority = SORT_PRIORITY_OPAQUE;
+    material->sort_priority = MAT_SORT_OPAQUE;
 
     material->palette.tlut = 0;
     material->palette.idx = 0;
     material->palette.size = 0;
     material->flags = 0;
+    material->use_obj_fog = false;
 }
 
 void material_destroy(struct material* material) {
     if (material->tex0.sprite) {
-        sprite_cache_release(material->tex0.sprite);
+        sprite_cache_release_direct(material->tex0.sprite);
     }
 
     for (int i = 0; i < material->tex0.num_frames; i += 1) {
-        sprite_cache_release(material->tex0.frames[i]);
+        sprite_cache_release_direct(material->tex0.frames[i]);
     }
 
     free(material->tex0.frames);
 
     if (material->tex1.sprite) {
-        sprite_cache_release(material->tex1.sprite);
+        sprite_cache_release_direct(material->tex1.sprite);
     }
 
     for (int i = 0; i < material->tex1.num_frames; i += 1) {
-        sprite_cache_release(material->tex1.frames[i]);
+        sprite_cache_release_direct(material->tex1.frames[i]);
     }
 
     free(material->tex1.frames);
@@ -131,8 +137,10 @@ void material_load_tex(struct material_tex* tex, FILE* file) {
         tex->frames = NULL;
     }
 
-    fread(&tex->scroll_x, sizeof(float), 1, file);
-    fread(&tex->scroll_y, sizeof(float), 1, file);
+    fread(&tex->use_placeholder, sizeof(bool), 1, file);
+
+    fread(&tex->scroll_x, sizeof(material_scroll_t), 1, file);
+    fread(&tex->scroll_y, sizeof(material_scroll_t), 1, file);
 
     if (filename_len) {
         tex->sprite = sprite_cache_load(filename);
@@ -203,7 +211,6 @@ void material_load(struct material* into, FILE* material_file) {
 
     bool has_palette = false;
 
-
     while (has_more) {
         uint8_t nextCommand;
         fread(&nextCommand, 1, 1, material_file);
@@ -234,17 +241,10 @@ void material_load(struct material* into, FILE* material_file) {
                         into->flags |= MATERIAL_FLAGS_Z_WRITE;
                     }
 
-                    // TODO check when the zmode is decal
-                    if ((other_modes & SOM_ZMODE_MASK) == SOM_ZMODE_DECAL) {
-                        into->sort_priority = SORT_PRIORITY_DECAL;
-                    }
-
-                    if ((other_modes & SOM_Z_WRITE) == 0) {
-                        into->sort_priority = SORT_PRIORITY_TRANSPARENT;
-                    }
-
-                    if (!(other_modes & SOM_Z_COMPARE)) {
-                        into->sort_priority = SORT_PRIORITY_NO_DEPTH_TEST;
+                    if ((other_modes & (0x3 << 24)) == (_RDPQ_SOM_BLEND1_B1_FOG_ALPHA << 24) || 
+                        (other_modes & (0x3 << 26)) == (_RDPQ_SOM_BLEND1_B1_FOG_ALPHA << 26)
+                    ) {
+                        into->use_obj_fog = true;
                     }
                 }
                 break;
@@ -378,7 +378,7 @@ void material_load(struct material* into, FILE* material_file) {
     if (into->tex0.texture_enabled) {
         if (into->tex0.sprite) {
             material_upload_tex(TILE0, &into->tex0);
-        } else if (into->tex0.num_frames) {
+        } else if (into->tex0.num_frames || into->tex0.use_placeholder) {
             material_upload_placeholder(TILE0, &into->tex0);
         }
 
@@ -387,7 +387,7 @@ void material_load(struct material* into, FILE* material_file) {
     if (into->tex1.texture_enabled) {
         if (into->tex1.sprite) {
             material_upload_tex(TILE1, &into->tex1);
-        } else if (into->tex1.num_frames) {
+        } else if (into->tex1.num_frames || into->tex0.use_placeholder) {
             material_upload_placeholder(TILE1, &into->tex1);
         }
 
@@ -408,24 +408,41 @@ void material_release(struct material* material) {
     material_destroy(material);
 }
 
-void material_check_texture_scroll(int tile, struct material_tex* tex) {
-    if (!tex->texture_enabled || (!tex->scroll_x && !tex->scroll_y)) {
+int material_calc_offset(material_scroll_t* scroll, float anim_time) {
+    if (scroll->type == MATERIAL_SCROLL_NONE || scroll->time == 0.0f) {
+        return 0;
+    }
+
+    float time = fmodf(anim_time / scroll->time + (1.0f / 255.0f) * scroll->phase_shift, scroll->pingpong ? 2.0f : 1.0f);
+
+    if (scroll->pingpong && time > 1.0f) {
+        time = 2.0f - time;
+    }
+
+    switch (scroll->type) {
+        case MATERIAL_SCROLL_EASE_IN:
+            time = lerp_ease_in(time);
+            break;
+        case MATERIAL_SCROLL_EASE_OUT:
+            time = lerp_ease_out(time);
+            break;
+        case MATERIAL_SCROLL_EASE_IN_OUT:
+            time = lerp_ease_in_out(time);
+            break;
+        default:
+            break;
+    }
+
+    return (int)mathfLerp(scroll->start, scroll->end, time);
+}
+
+void material_check_texture_scroll(int tile, struct material_tex* tex, float anim_time) {
+    if (!tex->texture_enabled || (!tex->scroll_x.type && !tex->scroll_y.type)) {
         return;
     }
 
-    int w = tex->width << 2;
-    int h = tex->height << 2;
-
-    int x_offset = (int)(total_time * tex->scroll_x * w) % w;
-    int y_offset = (int)(total_time * tex->scroll_y * h) % h;
-
-    if (x_offset < 0) {
-        x_offset += w;
-    }
-
-    if (y_offset < 0) {
-        y_offset += h;
-    }
+    int x_offset =  material_calc_offset(&tex->scroll_x, anim_time);
+    int y_offset =  material_calc_offset(&tex->scroll_y, anim_time);
 
     rdpq_set_tile_size_fx(
         tile, 
@@ -437,13 +454,13 @@ void material_check_texture_scroll(int tile, struct material_tex* tex) {
 void material_apply(struct material* material) {
     rspq_block_run(material->block);
 
-    material_check_texture_scroll(TILE0, &material->tex0);
-    material_check_texture_scroll(TILE1, &material->tex1);
+    material_check_texture_scroll(TILE0, &material->tex0, scene_time);
+    material_check_texture_scroll(TILE1, &material->tex1, scene_time);
 }
 
-void material_apply_scroll(struct material* material) {
-    material_check_texture_scroll(TILE0, &material->tex0);
-    material_check_texture_scroll(TILE1, &material->tex1);
+void material_apply_scroll(struct material* material, float anim_time) {
+    material_check_texture_scroll(TILE0, &material->tex0, anim_time);
+    material_check_texture_scroll(TILE1, &material->tex1, anim_time);
 }
 
 void material_debug(struct material* material, const char* name) {
@@ -453,4 +470,142 @@ void material_debug(struct material* material, const char* name) {
     uint32_t switch_count = rspq_count_overlay_switches(material->block, &overlay);
     debugf( " switch %d overlay %x\n", (int)switch_count, (int)overlay);
 #endif
+}
+
+
+void material_placeholder_block_init(material_placeholder_block_t* placeholder, material_placeholder_block_definition_t* def) {
+    memcpy(placeholder, def, sizeof(material_placeholder_block_definition_t));
+
+    for (int block_idx = 0; block_idx < 2; block_idx += 1) {
+        rspq_block_begin();
+        if (placeholder->has_prim) {
+            rdpq_set_prim_register_raw((color_t){}, 0, 0);
+        }
+        if (placeholder->has_env) {
+            rdpq_set_env_color((color_t){});
+        }
+        if (placeholder->tex0_width) {
+            rdpq_set_tile_size_fx(TILE0, 0, 0, 0, 0);
+        }
+        if (placeholder->tex1_width) {
+            rdpq_set_tile_size_fx(TILE1, 0, 0, 0, 0);
+        }
+        placeholder->blocks[block_idx] = rspq_block_end();
+    }
+}
+
+void material_placeholder_block_destroy(material_placeholder_block_t* placeholder) {
+    rspq_block_free(placeholder->blocks[0]);
+    rspq_block_free(placeholder->blocks[1]);
+}
+
+#define UNPACK(value, offset, size)        (((value) >> offset) & ((1 << (size)) - 1))
+#define PACK(value, offset, size)   (((uint32_t)(value) & ((1 << (size)) - 1)) << (offset))
+
+void material_placeholder_set_prim(material_placeholder_block_t* placeholder, color_t color) {
+    if (!placeholder->has_prim) {
+        return;
+    }
+
+    uint32_t* cmd = rsqp_get_rdp_cmds(placeholder->blocks[render_parity]);
+    
+    // skip pipe sync
+    cmd += 2;
+    
+    assert(UNPACK(cmd[0], 24, 6) == RDPQ_CMD_SET_PRIM_COLOR);
+    cmd[1] = *(uint32_t*)&color;
+}
+
+void material_placeholder_set_env(material_placeholder_block_t* placeholder, color_t color) {
+    if (!placeholder->has_env) {
+        return;
+    }
+
+    uint32_t* cmd = rsqp_get_rdp_cmds(placeholder->blocks[render_parity]);
+    
+    // skip pipe sync
+    cmd += 2;
+
+    if (placeholder->has_prim) {
+        cmd += 2;
+    }
+
+    assert(UNPACK(cmd[0], 24, 6) == RDPQ_CMD_SET_ENV_COLOR);
+    cmd[1] = *(uint32_t*)&color;
+}
+
+static inline void material_placeholder_write_tile_size(uint32_t* block, rdpq_tile_t tile, uint16_t s0, uint16_t t0, uint16_t s1, uint16_t t1) {
+    assert(UNPACK(block[0], 24, 6) == RDPQ_CMD_SET_TILE_SIZE);
+    block[0] = PACK(3, 30, 2) | PACK(RDPQ_CMD_SET_TILE_SIZE, 24, 6) | PACK(s0, 12, 12) | PACK(t0, 0, 12);
+    block[1] = PACK(tile, 24, 3) | PACK(s1, 12, 12) | PACK(t1, 0, 12);
+}
+
+void material_placeholder_set_scroll0(material_placeholder_block_t* placeholder, uint16_t s0, uint16_t t0) {
+    if (!placeholder->tex0_width) {
+        return;
+    }
+
+    uint32_t* cmd = rsqp_get_rdp_cmds(placeholder->blocks[render_parity]);
+
+    if (placeholder->has_prim || placeholder->has_env) {
+        // skip pipe sync
+        cmd += 2;
+    }
+
+    if (placeholder->has_prim) {
+        cmd += 2;
+    }
+    
+    if (placeholder->has_env) {
+        cmd += 2;
+    }
+    
+    // skip tile sync
+    cmd += 2;
+
+    material_placeholder_write_tile_size(
+        cmd, 
+        TILE0, 
+        s0, 
+        t0, 
+        s0 + (placeholder->tex0_width << 2) - 4,
+        t0 + (placeholder->tex0_height << 2) - 4
+    );
+}
+
+void material_placeholder_set_scroll1(material_placeholder_block_t* placeholder, uint16_t s0, uint16_t t0) {
+    if (!placeholder->tex1_width) {
+        return;
+    }
+
+    uint32_t* cmd = rsqp_get_rdp_cmds(placeholder->blocks[render_parity]);
+    
+    if (placeholder->has_prim || placeholder->has_env) {
+        // skip pipe sync
+        cmd += 2;
+    }
+
+    if (placeholder->has_prim) {
+        cmd += 2;
+    }
+    
+    if (placeholder->has_env) {
+        cmd += 2;
+    }
+    
+    if (placeholder->tex0_width) {
+        cmd += 2;
+    }
+
+    // skip tile sync
+    cmd += 2;
+
+    material_placeholder_write_tile_size(
+        cmd, 
+        TILE1, 
+        s0, 
+        t0, 
+        s0 + (placeholder->tex1_width << 2) - 4,
+        t0 + (placeholder->tex1_height << 2) - 4
+    );
 }

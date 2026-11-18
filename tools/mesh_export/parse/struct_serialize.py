@@ -2,9 +2,47 @@ import bpy
 import mathutils
 import math
 import struct
+import os.path
+import os
+from bpy.path import abspath
 
 from . import struct_parse
 from . import line_mesh_builder
+
+def get_scene_resource(name: str) -> str:
+    base = os.path.join(os.getcwd(), 'assets')
+    library_location = bpy.data.filepath
+
+    if not library_location.startswith(base):
+        raise Exception(f'could not get rom path to {library_location} with base path {base}')
+
+    return f'rom:{os.path.splitext(library_location[len(base):])[0]}_{name}'
+
+
+def get_rom_path(library_path: str, new_suffix: str) -> str:
+    base = os.path.join(os.getcwd(), 'assets')
+    library_location = os.path.normpath(abspath(library_path))
+
+    if not library_location.startswith(base):
+        raise Exception(f'could not get rom path to {library_location} with base path {base}')
+
+    return f'rom:{os.path.splitext(library_location[len(base):])[0]}{new_suffix}'
+
+class ColliderInfo():
+    def __init__(self, mesh: bpy.types.Mesh, transform: mathutils.Matrix):
+        self.mesh: bpy.types.Mesh = mesh
+        self.transform: mathutils.Matrix = transform
+
+class RoomExport():
+    def __init__(self):
+        self.name: str = ""
+        self.static: list[bpy.types.Object] = []
+        self.colliders: list[ColliderInfo] = []
+        # static particles built by entities.particles.build_particles
+        self.particles: list = []
+        # entities spawned with the room and indices into the scene's shared entities
+        self.entities: list = []
+        self.shared_entity_indices: list[int] = []
 
 class SerializeContext():
     def __init__(self, enums):
@@ -15,6 +53,8 @@ class SerializeContext():
         self._current_offset = 0
         self._did_write = False
         self._obj_spawner_mapping: dict[str, int] = {}
+        self._mesh_exports: set[bpy.types.Object] = set()
+        self.room_exports: list[RoomExport] = []
 
     def get_string_offset(self, value: str):
         if value in self._strings:
@@ -75,6 +115,18 @@ class SerializeContext():
         
         return 0xFFFFFFFF
 
+    def add_mesh_export(self, mesh: bpy.types.Object):
+        self._mesh_exports.add(mesh)
+
+    def get_meshes_to_export(self) -> list[bpy.types.Object]:
+        return list(self._mesh_exports)
+
+    def get_room(self, index: int) -> RoomExport:
+        while index >= len(self.room_exports):
+            self.room_exports.append(RoomExport())
+
+        return self.room_exports[index]
+
 
 fixed_sizes = {
     'float': 4,
@@ -98,6 +150,7 @@ fixed_sizes = {
     'any_variable': 2,
     'line_mesh_data_ref': 4,
     'entity_spawner': 4,
+    'collider_shape_t': 28,
 }
 
 fixed_alignments = {
@@ -122,6 +175,7 @@ fixed_alignments = {
     'any_variable': 2,
     'line_mesh_data_ref': 4,
     'entity_spawner': 4,
+    'collider_shape_t': 4,
 }
 
 struct_formats = {
@@ -149,15 +203,32 @@ struct_format_defaults = {
     'any_variable': 0xFFFF,
 }
 
-_string_aliases = {
-    'script_location',
-    'scene_entry_point',
-}
-
 SENSOR_SIZE = 36
 
-def _is_string_type(definition):
-    return isinstance(definition, struct_parse.PointerType) and definition.sub_type == 'char' or definition in _string_aliases
+def _get_string_value(obj: bpy.types.Object, definition, field_name: str | None, context: SerializeContext) -> str | None:
+    if not struct_parse.is_string_type(definition):
+        return None
+
+    if definition == 'mesh_location':
+        obj_name = str(get_value(obj, field_name, ""))
+
+        to_extract = obj
+
+        if obj_name.startswith('obj '):
+            to_extract = bpy.data.objects[obj_name[len('obj '):]]
+
+        mesh_obj = to_extract.data
+
+        if not isinstance(mesh_obj, bpy.types.Mesh):
+            return ''
+
+        if mesh_obj.library:
+            return get_rom_path(mesh_obj.library.filepath, '.tmesh')
+        else:
+            context.add_mesh_export(to_extract)
+            return get_scene_resource(mesh_obj.name + '.tmesh')
+
+    return str(get_value(obj, field_name, ""))
 
 coordinate_convert = mathutils.Matrix.Rotation(math.pi * 0.5, 4, 'X')
 coordinate_convert_invert = mathutils.Matrix.Rotation(-math.pi * 0.5, 4, 'X')
@@ -188,8 +259,10 @@ def get_scale(obj: bpy.types.Object) -> mathutils.Vector:
     return scale
 
 def layout_strings(obj: bpy.types.Object, definition, context: SerializeContext, field_name = None):
-    if _is_string_type(definition):
-        context.get_string_offset(str(get_value(obj, field_name, "")))
+    str_value = _get_string_value(obj, definition, field_name, context)
+
+    if str_value != None:
+        context.get_string_offset(str_value)
 
     if definition == "line_mesh_data_ref":
         context.get_line_mesh_offset(obj)
@@ -223,7 +296,7 @@ def _apply_alignment(current_offset: int, alignment: int) -> int:
     return (current_offset + alignment - 1) & ~(alignment - 1)
 
 def obj_determine_alignment(definition, context: SerializeContext) -> int:
-    if _is_string_type(definition):
+    if struct_parse.is_string_type(definition):
         return 4
     
     if isinstance(definition, str):
@@ -259,11 +332,49 @@ def _write_padding(file, offset: int, definition, context: SerializeContext) -> 
     
     return new_offset
 
+def _write_collider_def(file, obj: bpy.types.Object, collider_obj: bpy.types.Object) -> bool:
+    relative_transform = obj.matrix_world.inverted() @ collider_obj.matrix_world
+
+    if not isinstance(collider_obj.data, bpy.types.Mesh) or len(collider_obj.data.vertices) == 0:
+        return False
+
+    mesh = collider_obj.data
+
+    min_pos = relative_transform @ mesh.vertices[0].co
+    max_pos = min_pos
+
+    for vtx in mesh.vertices:
+        vtx_pos = relative_transform @ vtx.co
+        min_pos = mathutils.Vector((
+            min(vtx_pos.x, min_pos.x),
+            min(vtx_pos.y, min_pos.y),
+            min(vtx_pos.z, min_pos.z)
+        ))
+        max_pos = mathutils.Vector((
+            max(vtx_pos.x, max_pos.x),
+            max(vtx_pos.y, max_pos.y),
+            max(vtx_pos.z, max_pos.z)
+        ))
+
+    half_size = (max_pos - min_pos) * 0.5
+    center = (min_pos + max_pos) * 0.5
+
+    file.write(struct.pack(
+        ">Iffffff", 
+        2, 
+        half_size.x, half_size.z, half_size.y,
+        center.x, center.z, -center.y
+    ))
+    return True
+
+
 def write_obj(file, obj: bpy.types.Object, definition, context: SerializeContext, field_name: str | None = None, offset: int = 0) -> int:
     offset = _write_padding(file, offset, definition, context)
 
-    if _is_string_type(definition):
-        file.write(struct.pack(">I", context.get_string_offset(str(get_value(obj, field_name, "")))))
+    str_value = _get_string_value(obj, definition, field_name, context)
+
+    if str_value != None:
+        file.write(struct.pack(">I", context.get_string_offset(str_value)))
         return offset + 4
     
     if isinstance(definition, str):
@@ -289,6 +400,14 @@ def write_obj(file, obj: bpy.types.Object, definition, context: SerializeContext
         elif definition == 'struct Quaternion':
             if field_name == 'rotation':
                 write_quaternion_rotation(file, obj)
+                return offset + 16
+            
+            value = get_value(obj, field_name, 0)
+            if isinstance(value, str):
+                if value.startswith('obj '):
+                    write_quaternion_rotation(file, bpy.data.objects[value[len('obj '):]])
+                else:
+                    file.write(struct.pack('>ffff', 0, 0, 0, 1))
                 return offset + 16
         elif definition == 'float':
             if field_name == 'scale':
@@ -330,6 +449,13 @@ def write_obj(file, obj: bpy.types.Object, definition, context: SerializeContext
             spawner_name = get_value(obj, field_name, '')
             file.write(struct.pack(">I", context.get_spawner_id(spawner_name)))
             return offset + 4
+        elif definition == 'collider_shape_t':
+            value = get_value(obj, field_name, 0)
+            
+            if not isinstance(value, str) or not value or not _write_collider_def(file, obj, bpy.data.objects[value[len('obj '):]]):
+                file.write(struct.pack(">Iffffff", 2, 0, 0, 0, 0, 0, 0))
+            
+            return offset + 28
          
         raise Exception(f"unknown field type '{definition}' {field_name}")
     
@@ -351,7 +477,7 @@ class TypeLocation():
 def _obj_gather_types(definition, context: SerializeContext, current_offset: int) -> int:
     current_offset = _apply_alignment(current_offset, obj_determine_alignment(definition, context))
 
-    if _is_string_type(definition):
+    if struct_parse.is_string_type(definition):
         return current_offset + 4
     
     if isinstance(definition, str):
@@ -377,3 +503,4 @@ def _obj_gather_types(definition, context: SerializeContext, current_offset: int
 def obj_gather_types(definition, context: SerializeContext) -> int:
     result = _obj_gather_types(definition, context, 0)
     return _apply_alignment(result, obj_determine_alignment(definition, context))
+

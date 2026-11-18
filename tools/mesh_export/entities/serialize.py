@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 
 from . import material
 import struct
@@ -277,6 +278,17 @@ def _serialize_tex_axis(file, axis: material.TexAxis):
     file.write(int(axis.mask & 0xFF).to_bytes(1, 'big'))
     file.write(int(axis.shift & 0xFF).to_bytes(1, 'big'))
 
+def _serialize_scroll(file, scroll: material.TexScroll, size: int):
+    file.write(struct.pack('>BBBBhhf',
+        scroll.type.value,
+        1 if scroll.pingpong else 0,
+        math.floor(scroll.phase_shift * 255 + 0.5),
+        0,
+        math.floor(scroll.start * size * 4 + 0.5),
+        math.floor(scroll.end * size * 4 + 0.5),
+        scroll.time,
+    ))
+
 def _serialize_tex(file, tex: material.Tex | None, prev_tex: material.Tex | None = None):
     if not tex:
         file.write(b'\0')
@@ -311,7 +323,10 @@ def _serialize_tex(file, tex: material.Tex | None, prev_tex: material.Tex | None
     else:
         file.write(b'\0\0')
 
-    file.write(struct.pack('>ff', tex.s.scroll, -tex.t.scroll))
+    file.write(b'\x01' if tex.use_texture_reference else b'\0')
+
+    _serialize_scroll(file, tex.s.scroll, tex.width)
+    _serialize_scroll(file, tex.t.scroll, tex.height)
 
 def _serialize_palette(file, palette: list, palette_offset: int):
     file.write(COMMAND_PALETTE.to_bytes(1, 'big'))
@@ -333,7 +348,7 @@ def flags_for_material(mat: material.Material) -> int | None:
 
 def serialize_material_file(output, mat: material.Material, current_state: material.Material | None = None):
     output.write('MATR'.encode())
-    output.write(struct.pack('>hb', mat.priority or 1, mat.microcode.value))
+    output.write(struct.pack('>hb', mat.priority if mat.priority != None else 1, mat.microcode.value))
 
     _serialize_tex(output, mat.tex0)
     _serialize_tex(output, mat.tex1, mat.tex0)

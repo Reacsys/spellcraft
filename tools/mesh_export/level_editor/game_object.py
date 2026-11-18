@@ -6,6 +6,8 @@ from ..parse import struct_parse
 import bmesh
 import mathutils
 
+from . import map_generator
+
 def _get_item_types(self, context):
     return list(map(lambda x: (x.name, x.name, ''), object_definitions.get_enum('enum inventory_item_type').all_values()))
 
@@ -34,7 +36,7 @@ def _get_entry_points(self, context):
     return list(map(lambda x: (x, x[len('rom:/scenes/'):], ''), object_definitions.get_entry_points()))
 
 def _get_positions(self, context):
-    result = []
+    result = ['default']
 
     for obj in bpy.data.objects:
         result.append(f'obj {obj.name}')
@@ -297,7 +299,10 @@ _enum_mapping = {
     'integer_variable': NODE_OT_game_object_integer_variable.bl_idname,
     'any_variable': NODE_OT_game_object_any_variable.bl_idname,
     'struct Vector3': NODE_OT_game_object_positions.bl_idname,
+    'struct Quaternion': NODE_OT_game_object_positions.bl_idname,
+    'mesh_location': NODE_OT_game_object_positions.bl_idname,
     'entity_spawner': NODE_OT_game_object_spawners.bl_idname,
+    'collider_shape_t': NODE_OT_game_object_positions.bl_idname,
 }
 
 global_attributes = [
@@ -361,13 +366,15 @@ def _init_default_properties(target):
             target[attr.name] = default_value
         elif attr.data_type == 'collectable_sub_type':
             target[attr.name] = 'ITEM_TYPE_NONE'
-        elif attr.data_type == 'script_location' or attr.data_type == 'scene_entry_point':
+        elif attr.data_type == 'script_location' or attr.data_type == 'scene_entry_point' or attr.data_type == 'mesh_location' or attr.data_type == 'collider_shape_t':
             target[attr.name] = ''
         elif attr.data_type == 'room_id':
             target[attr.name] = 'room_default'
         elif attr.data_type == 'boolean_variable' or attr.data_type == 'integer_variable' or attr.data_type == 'any_variable':
             target[attr.name] = 'disconnected'
         elif attr.data_type == 'struct Vector3':
+            target[attr.name] = ''
+        elif attr.data_type == 'struct Quaternion':
             target[attr.name] = ''
         elif attr.data_type == 'entity_spawner':
             target[attr.name] = ''
@@ -388,6 +395,21 @@ class NODE_OT_game_object_init(bpy.types.Operator):
             return
         
         _init_default_properties(context.object)
+
+        return {'FINISHED'}
+
+class NODE_OT_build_map_outline(bpy.types.Operator):
+    """Build a map mesh"""
+    bl_idname = "node.build_map_outline"
+    bl_label = "Automatically create a map mesh"
+    bl_description = "Automatically create a map mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        if not context.object:
+            return
+        
+        map_generator.filter_mesh_by_normal(context.object)
 
         return {'FINISHED'}
     
@@ -420,13 +442,17 @@ class MapOutlinePanel(bpy.types.Panel):
     
     @classmethod
     def poll(cls, context):
-        return context.object and context.object.name.lower().startswith('map outline')
+        return context.object and (context.object.name.lower().startswith('map outline') or 'collision' in context.object.name.lower())
     
     def draw(self, context):
         target = context.object
 
-        self.layout.label(text='Map outline')
-        self.layout.prop(target, 'map_layer')
+        if context.object.name.lower().startswith('map outline'):
+            self.layout.label(text='Map outline')
+            self.layout.prop(target, 'map_layer')
+
+        if 'collision' in context.object.name.lower():
+            self.layout.operator(NODE_OT_build_map_outline.bl_idname, text='Create outline mesh')
 
 
 class EntryPointPanel(bpy.types.Panel):
@@ -688,6 +714,7 @@ _classes = [
     NODE_OT_game_object_add_entry_point,
     NODE_OT_game_object_add_loading_zone,
     NODE_OT_game_object_init,
+    NODE_OT_build_map_outline,
     NODE_OT_game_object_positions,
     NODE_OT_game_object_spawners,
     LoadingZonePanel,

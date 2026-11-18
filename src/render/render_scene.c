@@ -6,10 +6,12 @@
 #include "defs.h"
 #include "../config.h"
 #include "../profile/profile.h"
+#include "fog.h"
 
 #define MIN_RENDER_SCENE_SIZE   64
 
 struct render_scene r_scene_3d;
+static camera_t* render_scene_camera;
 
 void render_scene_reset() {
     callback_list_reset(&r_scene_3d.callbacks, sizeof(struct render_scene_element), MIN_RENDER_SCENE_SIZE, NULL);
@@ -129,7 +131,7 @@ void render_scene_render_point(void* data, struct render_batch* batch) {
     
             renderable->point_render.particle_data.colorA[3] = next;
             renderable->point_render.particle_data.colorB[3] = next;
-            data_cache_hit_writeback_invalidate(&renderable->point_render.particle_data, sizeof(TPXParticle));
+            data_cache_hit_writeback_invalidate(&renderable->point_render.particle_data, sizeof(TPXParticleS8));
         }
 
         renderable->point_render.current_stall_frame = renderable->point_render.stall_frame_count;
@@ -148,6 +150,10 @@ static render_scene_callback render_callback[] = {
 
 // removed with render_scene_remove()
 void render_scene_add_renderable(struct renderable* renderable, float radius) {
+    if (radius == 0.0f) {
+        radius = renderable->mesh_render.mesh->radius;
+    }
+
     // remove with render_scene_remove()
     render_scene_add(
         transform_mixed_get_position(&renderable->transform), 
@@ -182,17 +188,22 @@ void render_scene_remove_step(void* data) {
 
 #define FX_SCALE    32
 
-void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct frame_memory_pool* pool) {
-    struct render_batch batch;
+void render_scene_render(T3DViewport* viewport, struct frame_memory_pool* pool) {
+    if (!render_scene_camera) {
+        return;
+    }
 
     struct ClippingPlanes clipping_planes;
     mat4x4 view_proj_matrix;
 
-    camera_apply(camera, viewport, &clipping_planes, view_proj_matrix);
+    camera_apply(render_scene_camera, viewport, &clipping_planes, view_proj_matrix);
 
     t3d_viewport_attach(viewport);
     // just in case I need this fix
     t3d_state_set_vertex_fx_scale(FX_SCALE);
+    fog_state_t fog_state = fog_get();
+    rdpq_set_fog_color(fog_state.color);
+    t3d_fog_set_range(fog_state.min * WORLD_SCALE, fog_state.max * WORLD_SCALE);
 
     SC_PROFILE_START(render);
 
@@ -200,7 +211,7 @@ void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct fr
 
     for (int i = 0; i < r_scene_3d.step_callbacks.count; ++i) {
         struct render_scene_step* step = callback_element_get_data(current_step);
-        ((render_step_callback)current_step->callback)(step->data, view_proj_matrix, camera, viewport, pool);
+        ((render_step_callback)current_step->callback)(step->data, view_proj_matrix, render_scene_camera, viewport, pool);
 
         current_step = callback_list_next(&r_scene_3d.step_callbacks, current_step);
     }
@@ -213,7 +224,8 @@ void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct fr
 
     SC_PROFILE_END(render, step_callbacks);
 
-    render_batch_init(&batch, &camera->transform, pool);
+    struct render_batch batch;
+    render_batch_init(&batch, &render_scene_camera->transform, pool);
 
     SC_PROFILE_START(render);
 
@@ -226,7 +238,7 @@ void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct fr
 
         if (el->center) {
             vector3_t offset;
-            vector3Sub(el->center, &camera->transform.position, &offset);
+            vector3Sub(el->center, &render_scene_camera->transform.position, &offset);
     
             for (int plane = 0; el->center && plane < 2; plane += 1) {
                 float distance = planePointDistance(&clipping_planes.planes[plane], &offset);
@@ -239,6 +251,7 @@ void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct fr
         }
 
         if (should_draw) {
+            batch.curr_pos = el->center;
             ((render_scene_callback)current->callback)(el->data, &batch);
         }
         
@@ -248,4 +261,18 @@ void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct fr
     SC_PROFILE_START(render);
     render_batch_finish(&batch, view_proj_matrix, viewport);
     SC_PROFILE_END(render, render_batch_finish);
+}
+
+void render_scene_use_camera(camera_t* camera) {
+    render_scene_camera = camera;
+}
+
+void render_scene_remove_camera(camera_t* camera) {
+    if (render_scene_camera == camera) {
+        render_scene_camera = NULL;
+    }
+}
+
+camera_t* render_scene_active_camera() {
+    return render_scene_camera;
 }

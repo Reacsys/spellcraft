@@ -3,16 +3,48 @@
 
 #include <GL/gl.h>
 #include <libdragon.h>
+#include <stdbool.h>
 
-#define SORT_PRIORITY_NO_DEPTH_TEST -100
-#define SORT_PRIORITY_OPAQUE        0
-#define SORT_PRIORITY_DECAL         100
-#define SORT_PRIORITY_TRANSPARENT   200
+enum material_sort_priority {
+    MAT_SORT_BACKGROUND,
+    MAT_SORT_OPAQUE,
+    MAT_SORT_OPAQUE_DECAL,
+    MAT_SORT_OPAQUE_INTER,
+    MAT_SORT_CUTOUT,
+    MAT_SORT_TRANSPARENT,
+    MAT_SORT_TRANSPARENT_DECAL,
+    MAT_SORT_TRANSPARENT_INTER,
+};
+
+typedef enum material_sort_priority material_sort_priority_t;
 
 #define DEBUG_MATERIALS 0
 
+enum material_scroll_type {
+    MATERIAL_SCROLL_NONE,
+    MATERIAL_SCROLL_LINEAR,
+    MATERIAL_SCROLL_EASE_IN,
+    MATERIAL_SCROLL_EASE_OUT,
+    MATERIAL_SCROLL_EASE_IN_OUT,
+};
+
+typedef enum material_scroll_type material_scroll_type_t;
+
+struct material_scroll {
+    uint8_t type; // material_scroll_type_t
+    bool pingpong;
+    uint8_t phase_shift;
+    uint8_t reserved;
+    int16_t start;
+    int16_t end;
+    float time;
+};
+
+typedef struct material_scroll material_scroll_t;
+
 struct material_tex {
     bool texture_enabled;
+    bool use_placeholder;
     sprite_t* sprite;
     rdpq_tileparms_t params;
     uint16_t s0, t0, s1, t1;
@@ -21,7 +53,7 @@ struct material_tex {
     uint16_t width, height;
     uint16_t num_frames;
     sprite_t** frames;
-    float scroll_x, scroll_y;
+    material_scroll_t scroll_x, scroll_y;
     // rdpq_set_lookup_address
     // surface_make_placeholder_linear
 };
@@ -50,6 +82,7 @@ struct material {
     int16_t sort_priority;
     uint16_t flags;
     uint8_t microcode;
+    bool use_obj_fog;
 };
 
 typedef struct material material_t;
@@ -57,6 +90,7 @@ typedef struct material material_t;
 struct material_pair {
     material_t apply;
     material_t revert;
+    bool is_embedded;
 };
 
 typedef struct material_pair material_pair_t;
@@ -72,7 +106,7 @@ void material_load_file(struct material* into, const char* filename);
 void material_release(struct material* material);
 
 void material_apply(struct material* material);
-void material_apply_scroll(struct material* material);
+void material_apply_scroll(struct material* material, float anim_time);
 
 void material_debug(struct material* material, const char* name);
 
@@ -87,10 +121,41 @@ static inline void material_pair_release(material_pair_t* material) {
 }
 
 static inline void material_pair_apply(material_pair_t* material, material_pair_t* prev) {
-    if (prev) {
+    if (prev && prev->revert.block) {
         rspq_block_run(prev->revert.block);
     }
     material_apply(&material->apply);
 }
+
+struct material_placeholder_block_definition {
+    bool has_prim;
+    bool has_env;
+    uint16_t tex0_width;
+    uint16_t tex0_height;
+    uint16_t tex1_width;
+    uint16_t tex1_height;
+};
+
+typedef struct material_placeholder_block_definition material_placeholder_block_definition_t;
+
+struct material_placeholder_block {
+    bool has_prim;
+    bool has_env;
+    uint16_t tex0_width;
+    uint16_t tex0_height;
+    uint16_t tex1_width;
+    uint16_t tex1_height;
+    rspq_block_t* blocks[2];
+};
+
+typedef struct material_placeholder_block material_placeholder_block_t;
+
+void material_placeholder_block_init(material_placeholder_block_t* block, material_placeholder_block_definition_t* def);
+void material_placeholder_block_destroy(material_placeholder_block_t* block);
+
+void material_placeholder_set_prim(material_placeholder_block_t* placeholder, color_t color);
+void material_placeholder_set_env(material_placeholder_block_t* placeholder, color_t color);
+void material_placeholder_set_scroll0(material_placeholder_block_t* placeholder, uint16_t s0, uint16_t t0);
+void material_placeholder_set_scroll1(material_placeholder_block_t* placeholder, uint16_t s0, uint16_t t0);
 
 #endif

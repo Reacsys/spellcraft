@@ -39,7 +39,7 @@ void renderable_init_point(struct renderable* renderable, vector3_t* position, f
     renderable->point_render.stall_frame_count = 3;
     renderable->point_render.current_stall_frame = 0;
 
-    renderable->point_render.particle_data = (TPXParticle){
+    renderable->point_render.particle_data = (TPXParticleS8){
         .sizeA = 127,
         .sizeB = 127,
         .colorA = {255, 255, 255, 0},
@@ -66,7 +66,7 @@ void renderable_destroy_direct(struct renderable* renderable) {
 }
 
 void renderable_destroy(struct renderable* renderable) {
-    cleanup_safe((void (*)(void*))tmesh_cache_release, renderable->mesh_render.mesh);
+    tmesh_cache_release(renderable->mesh_render.mesh);
     renderable_destroy_direct(renderable);
 }
 
@@ -83,6 +83,15 @@ void renderable_single_axis_init_direct(struct renderable* renderable, struct Tr
     renderable->mesh_render.mesh = mesh;
     _renderable_init(renderable);
     renderable->type = TRANSFORM_TYPE_SINGLE_AXIS;
+}
+
+void renderable_set_mesh_direct(renderable_t* renderable, tmesh_t* mesh) {
+    if (mesh == renderable->mesh_render.mesh) {
+        return;
+    }
+
+    renderable_destroy_direct(renderable);
+    renderable_single_axis_init_direct(renderable, renderable->transform.transform, mesh);
 }
 
 void renderable_destroy_point(struct renderable* renderable) {

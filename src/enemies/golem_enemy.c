@@ -7,6 +7,7 @@
 #include "../entity/entity_spawner.h"
 
 #define VISION_DISTANCE 10.0f
+#define CYLINDER_VISION_DISTANCE    2.0f
 
 #define GOLEM_TURN_RATE             0.7f
 #define GOLEM_HEAD_TURN_RATE        2.0f
@@ -53,6 +54,10 @@ static const char* golem_animation_names[GOLEM_ANIM_COUNT] = {
 static dynamic_object_type_t golem_collider = {
     CAPSULE_COLLIDER(0.7f, 0.8f),
     .center = {0.0f, 1.5f, 0.0f},
+    .friction = 1.0f,
+    .bounce = 0.0f,
+    .push_resistance = PUSH_RESISTANCE_HEAVY,
+    .density = DYNAMIC_DENSITY_HEAVY,
 };
 
 static dynamic_object_type_t golem_fist_collider = {
@@ -66,6 +71,7 @@ static spatial_trigger_type_t golem_vision = {
             .radius = VISION_DISTANCE,
             .half_height = VISION_DISTANCE,
             .angle = {SQRT_1_2, SQRT_1_2},
+            .cylinder_radius = CYLINDER_VISION_DISTANCE,
         },
     },
 };
@@ -99,13 +105,13 @@ void golem_fist_deactivate(golem_fist_t* fist) {
 }
 
 void golem_fist_update(golem_enemy_t* golem, golem_fist_t* fist) {
-    transform_t fist_transform;
-    armature_bone_transform(&golem->renderable.mesh_render.armature, fist->attachment->bone_index, &fist_transform);
-
-    transformPoint(&fist_transform, &golem_r_attachment->local_pos, &fist->position);
-    vector3Scale(&fist->position, &fist->position, 1.0f / MODEL_SCALE);
+    armature_transform_position(
+        &golem->renderable.mesh_render.armature, 
+        fist->attachment->bone_index,
+        &golem_r_attachment->local_pos, 
+        &fist->position
+    );
     transformSaTransformPoint(&golem->transform, &fist->position, &fist->position);
-
 }
 
 void golem_enemy_look_forward(golem_enemy_t* golem) {
@@ -255,6 +261,7 @@ void golem_update_speed(golem_enemy_t* golem, float speed) {
     vector3Scale(&target_vel, &target_vel, golem->target_speed);
     target_vel.y = golem->collider.velocity.y;
     golem->collider.velocity = target_vel;
+    dynamic_object_wake(&golem->collider);
 }
 
 void golem_enemy_update_follow(golem_enemy_t* golem) {
@@ -426,7 +433,7 @@ void golem_enemy_update(void* data) {
     golem_enemy->head_transform.position = golem_enemy->transform.position;
     vector2ComplexMul(&golem_enemy->head_rotation, &golem_enemy->transform.rotation, &golem_enemy->head_transform.rotation);
 
-    if (!health_is_alive(&golem_enemy->health) && golem_enemy->state != GOLEM_STATE_DIE) {
+    if ((!health_is_alive(&golem_enemy->health) || golem_enemy->collider.under_water) && golem_enemy->state != GOLEM_STATE_DIE) {
         golem_enemy_die(golem_enemy);
     }
 }
@@ -445,10 +452,15 @@ void golem_fist_init(golem_fist_t* fist, entity_id entity_id, armature_attachmen
         NULL
     );
     fist->collider.trigger_type = TRIGGER_TYPE_OVERLAP;
+    dynamic_object_wake(&fist->collider);
 }
 
 float golem_enemy_on_hit(void* data, struct damage_info* damage) {
     golem_enemy_t* golem = (golem_enemy_t*)data;
+
+    if (golem->state == GOLEM_STATE_IDLE) {
+        return 0.0f;
+    }
 
     if (damage->type & DAMAGE_TYPE_FIRE) {
         return damage->amount * FIRE_RESISTANCE;
@@ -463,7 +475,7 @@ void golem_enemy_init(golem_enemy_t* golem_enemy, struct golem_enemy_definition*
 
     renderable_single_axis_init_direct(&golem_enemy->renderable, &golem_enemy->transform, golem_full);
     render_scene_add(&golem_enemy->transform.position, 1.5f, golem_enemy_render, golem_enemy);
-    animator_init(&golem_enemy->animator, golem_full->armature.bone_count);
+    animator_init(&golem_enemy->animator, &golem_full->armature);
 
     spatial_trigger_init(&golem_enemy->vision, &golem_enemy->head_transform, &golem_vision, COLLISION_LAYER_DAMAGE_PLAYER, entity_id);
     collision_scene_add_trigger(&golem_enemy->vision);
@@ -487,7 +499,7 @@ void golem_enemy_init(golem_enemy_t* golem_enemy, struct golem_enemy_definition*
 
     golem_enemy->head_rotation = gRight2;
     golem_enemy->attack_timer = 0.0f;
-    golem_enemy->was_activated = false;
+    golem_enemy->was_activated = expression_get_bool(golem_enemy->activated);
 
     update_add(golem_enemy, golem_enemy_update, UPDATE_PRIORITY_ENEMY, UPDATE_LAYER_WORLD);
 

@@ -13,7 +13,7 @@ def remove_duplicates(mesh_data: mesh.mesh_data) -> mesh.mesh_data:
     first_vertex_index = {}
     index_mapping = {}
 
-    result = mesh.mesh_data(mesh_data.mat)
+    result = mesh_data.copy_blank()
 
     for idx, vertex in enumerate(mesh_data.vertices):
         key = mesh.pack_vertex(
@@ -47,7 +47,7 @@ def remove_unused_vertices(mesh_data: mesh.mesh_data) -> mesh.mesh_data:
 
     index_mapping = {}
 
-    result = mesh.mesh_data(mesh_data.mat)
+    result = mesh_data.copy_blank()
 
     for i in range(len(mesh_data.vertices)):
         if i in indices_set:

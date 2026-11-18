@@ -47,8 +47,13 @@ void spell_slot_init(
                 wind_init(&slot->data.wind, input, event_options, wind_lookup_definition(rune.watery ? ELEMENT_TYPE_LIGHTNING : ELEMENT_TYPE_FIRE, rune.earthy));
             } else {
                 if (!rune.watery) {
-                    slot->type = SPELL_EXEC_SLOT_TYPE_SWORD;
-                    elemental_sword_init(&slot->data.sword, input, event_options, ELEMENT_TYPE_FIRE);
+                    if (rune.earthy) {
+                        slot->type = SPELL_EXEC_SLOT_TYPE_BURST;
+                        burst_attack_init(&slot->data.burst_attack, input, &burst_attack_ground_fire);
+                    } else {
+                        slot->type = SPELL_EXEC_SLOT_TYPE_SWORD;
+                        elemental_sword_init(&slot->data.sword, input, event_options, ELEMENT_TYPE_FIRE);
+                    }
                 } else if (rune.earthy) {
                     slot->type = SPELL_EXEC_SLOT_TYPE_LIGHTNING_STORM;
                     lightning_storm_init(&slot->data.lightning_storm, input, event_options);
@@ -243,6 +248,9 @@ void spell_slot_destroy(struct spell_exec* exec, int slot_index) {
         case SPELL_EXEC_SLOT_TYPE_HURRICANE:
             hurricane_destroy(&slot->data.hurricane);
             break;
+        case SPELL_EXEC_SLOT_TYPE_BURST:
+            burst_attack_destroy(&slot->data.burst_attack);
+            break;
         default:
             break;
     }
@@ -302,6 +310,9 @@ void spell_slot_update(struct spell_exec* exec, int spell_slot_index) {
             break;
         case SPELL_EXEC_SLOT_TYPE_HURRICANE:
             isActive = hurricane_update(&slot->data.hurricane);
+            break;
+        case SPELL_EXEC_SLOT_TYPE_BURST:
+            isActive = burst_attack_update(&slot->data.burst_attack, &exec->spell_sources);
             break;
         default:
             break;
@@ -511,6 +522,7 @@ void spell_exec_start(struct spell_exec* exec, int button_index, struct spell* s
         return;
     }
 
+    data_source->flags.source = SPELL_CAST_SOURCE_CENTER;
     spell_exec_step(exec, button_index, spell, 0, data_source, 0.0f);
 }
 
@@ -584,8 +596,4 @@ float spell_exec_max_mana(struct spell_exec* exec) {
 
 float spell_exec_current_mana(struct spell_exec* exec) {
     return exec->spell_sources.mana_pool.current_mana;
-}
-
-float spell_exec_prev_mana(struct spell_exec* exec) {
-    return mana_pool_get_previous_mana(&exec->spell_sources.mana_pool);
 }

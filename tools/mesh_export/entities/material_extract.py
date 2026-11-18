@@ -119,7 +119,7 @@ def determine_material_from_nodes(mat: bpy.types.Material, result: material.Mate
         color_node: bpy.types.ShaderNodeTexImage = color_link.links[0].from_node
         color_name = 'TEX0'
 
-        input_filename = sys.argv[1]
+        input_filename = filename.source_filename()
         image_path = os.path.normpath(os.path.join(os.path.dirname(input_filename), color_node.image.filepath[2:]))
 
         result.tex0 = material.Tex()
@@ -331,10 +331,19 @@ def _determine_tex_axis_from_f3d(axis, image_size, uv_scroll, result: material.T
         result.mirror = True
 
     if uv_scroll and uv_scroll['animType'] == 'Linear':
-        result.scroll = uv_scroll['speed'] if 'speed' in uv_scroll else 1
+        speed = float(uv_scroll['speed'] if 'speed' in uv_scroll else 1)
+        result.scroll.type = result.scroll.type = material.TexScrollType.LINEAR
 
-    result.min = 0
-    result.max = image_size << 2
+        if speed < 0:
+            result.scroll.start = 1
+            result.scroll.time = 1 / -speed
+        else:
+            result.scroll.end = 1
+            result.scroll.time = 1 / speed
+
+
+    result.min = math.floor(axis['low'] * 4 + 0.5)
+    result.max = math.floor(axis['high'] * 4 + 0.5)
 
 filename_number_suffix = r'\d+\.png$'
 
@@ -363,11 +372,23 @@ def _look_for_frames(filename: str) -> list[str]:
 
     return result
 
-def _determine_tex_from_f3d(tex, uv_scroll, base_path: str, flipbook: bool = False) -> material.Tex | None:
+def _determine_scroll(tex_axis: material.TexAxis, tex_scroll_axis):
+    if tex_scroll_axis.type != 'NONE' and tex_scroll_axis.time != 0:
+        tex_axis.scroll.type = material.TexScrollType[tex_scroll_axis.type]
+        tex_axis.scroll.start = tex_scroll_axis.start
+        tex_axis.scroll.end = tex_scroll_axis.end
+        tex_axis.scroll.time = tex_scroll_axis.time
+        tex_axis.scroll.phase_shift = tex_scroll_axis.phase_shift
+        tex_axis.scroll.pingpong = tex_scroll_axis.pingpong
+
+
+def _determine_tex_from_f3d(tex, uv_scroll, base_path: str, tex_scroll, flipbook: bool = False) -> material.Tex | None:
     image = tex['tex']
 
     if not tex['tex_set'] or not image:
         return None
+
+    use_texture_reference = 'use_tex_reference' in tex and tex['use_tex_reference']
 
     result = material.Tex()
 
@@ -379,6 +400,10 @@ def _determine_tex_from_f3d(tex, uv_scroll, base_path: str, flipbook: bool = Fal
     else:
         result.set_frames(frames)
 
+    if use_texture_reference:
+        result.use_texture_reference = True
+        result.filename = None
+
     _determine_tex_axis_from_f3d(tex['S'], result.width, uv_scroll['x'] if uv_scroll and 'x' in uv_scroll else None, result.s)
     _determine_tex_axis_from_f3d(tex['T'], result.height, uv_scroll['y'] if uv_scroll and 'y' in uv_scroll else None, result.t)
 
@@ -389,9 +414,22 @@ def _determine_tex_from_f3d(tex, uv_scroll, base_path: str, flipbook: bool = Fal
         interval = tex['tile_scroll'].get('interval') or 1
 
         if s_scroll and interval:
-            result.s.scroll += s_scroll / interval
+            result.s.scroll.type = material.TexScrollType.LINEAR
+            if s_scroll < 0:
+                result.s.scroll.start = -s_scroll
+            else:
+                result.s.scroll.end = s_scroll
+            result.s.scroll.time = interval
         if t_scroll and interval:
-            result.t.scroll += t_scroll / interval
+            result.t.scroll.type = material.TexScrollType.LINEAR
+            if t_scroll < 0:
+                result.t.scroll.start = -t_scroll
+            else:
+                result.t.scroll.end = t_scroll
+            result.t.scroll.time = interval
+
+    _determine_scroll(result.s, tex_scroll.s)
+    _determine_scroll(result.t, tex_scroll.t)
 
     return result
 
@@ -600,7 +638,7 @@ def determine_material_from_f3d(mat: bpy.types.Material) -> material.Material:
 
     is_2_cycle = _lookup_mix_bool('G_CYC_2CYCLE', _get_safe(rdp_settings, 'g_mdsft_cycletype'))
 
-    base_path = sys.argv[1]
+    base_path = filename.source_filename()
 
     if mat.library:
         base_path = os.path.normpath(os.path.join(os.path.dirname(base_path), mat.library.filepath[2:]))
@@ -627,8 +665,9 @@ def determine_material_from_f3d(mat: bpy.types.Material) -> material.Material:
 
     flipbook_0 = 'flipbook_0' in mat and mat['flipbook_0']
 
-    result.tex0 = _determine_tex_from_f3d(_get_safe(f3d_mat, 'tex0'), uv_anim_0, base_path, flipbook = flipbook_0) if result.combine_mode.uses('TEX0') else None
-    result.tex1 = _determine_tex_from_f3d(_get_safe(f3d_mat, 'tex1'), uv_anim_1, base_path) if result.combine_mode.uses('TEX1') else None
+    result.tex0 = _determine_tex_from_f3d(_get_safe(f3d_mat, 'tex0'), uv_anim_0, base_path, mat.tex_scroll_0, flipbook = flipbook_0) if result.combine_mode.uses('TEX0') else None
+    result.tex1 = _determine_tex_from_f3d(_get_safe(f3d_mat, 'tex1'), uv_anim_1, base_path, mat.tex_scroll_1) if result.combine_mode.uses('TEX1') else None
+    
     result.layout_textures()
 
     if result.tex0 and result.tex0.palette_data or result.tex1 and result.tex1.palette_data:
@@ -690,7 +729,7 @@ def material_romname(bpy_mat: bpy.types.Material) -> str | None:
     return None
         
 
-def load_material_with_name(bpy_mat: bpy.types.Material) -> material.Material:
+def load_material_with_name(bpy_mat: bpy.types.Material | None) -> material.Material:
     if not bpy_mat:
         return material.Material()
     

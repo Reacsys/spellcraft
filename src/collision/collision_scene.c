@@ -18,6 +18,8 @@
 
 #define MAX_SNAP_TO_GROUND_ANGLE    35.0f
 #define KILL_PLANE                  -10.0f
+#define SLEEP_MOVE_THRESHOLD        0.001f
+#define SLEEP_FRAME_THRESHOLD       10
 
 struct collision_scene g_scene;
 static struct Vector2 max_ground_snap_angle;
@@ -284,7 +286,7 @@ void collision_scene_collide_dynamic(struct Vector3* prev_positions) {
                 if (a->type == COLLISION_ELEMENT_TYPE_DYNAMIC && b->type == COLLISION_ELEMENT_TYPE_DYNAMIC) {
                     struct dynamic_object* a_obj = a->object;
                     struct dynamic_object* b_obj = b->object;
-                    if (box3DHasOverlap(&a_obj->bounding_box, &b_obj->bounding_box)) {
+                    if ((!a_obj->is_sleeping || !b_obj->is_sleeping) && box3DHasOverlap(&a_obj->bounding_box, &b_obj->bounding_box)) {
                         if (a_obj->should_sweep_collide || b_obj->should_sweep_collide) {
                             collide_object_to_object_swept(
                                 a_obj, 
@@ -380,6 +382,58 @@ void collision_scene_collide_single(struct dynamic_object* object, struct Vector
     vector3Scale(&object->velocity, &object->velocity, 0.9f);
 }
 
+#define COPLANAR_THRESHOLD  0.01f
+
+contact_t* collision_remove_duplicate_contacts(contact_t* active_contacts) {
+    contact_t* curr_prev = NULL;
+    contact_t* curr_next;
+
+    for (
+        contact_t* curr = active_contacts;
+        curr;
+        curr_prev = curr, curr = curr_next
+    ) {
+        contact_t* other_prev = curr;
+        contact_t* other_next;
+
+        curr_next = curr->next;
+
+        for (
+            contact_t* other = curr->next;
+            other;
+            other_prev = other, other = other_next
+        ) {
+            vector3_t offset;
+            vector3Sub(&curr->point, &other->point, &offset);
+
+            other_next = other->next;
+
+            if (fabsf(vector3Dot(&offset, &curr->normal)) < COPLANAR_THRESHOLD) {
+                if (curr_next == other) {
+                    curr_next = other->next;
+                }
+
+                other_prev->next = other->next;
+                other->next = g_scene.next_free_contact;
+                g_scene.next_free_contact = other;
+                other = other_prev;
+            } else if (fabsf(vector3Dot(&offset, &other->normal)) < COPLANAR_THRESHOLD) {
+                if (curr_prev) {
+                    curr_prev->next = curr->next;
+                } else {
+                    active_contacts = curr->next;
+                }
+                curr->next = g_scene.next_free_contact;
+                g_scene.next_free_contact = curr;
+                curr = curr_prev;
+                break;
+            }
+        }
+    }
+
+    return active_contacts;
+}
+
 void collision_scene_snap_to_ground(struct dynamic_object* object, struct Vector3* prev_pos) {
     if (!object->shadow_contact || 
         object->shadow_contact->surface_type == SURFACE_TYPE_WATER ||
@@ -451,7 +505,9 @@ void collision_scene_collide() {
             --object->has_ice_dash;
         }
 
-        dynamic_object_update(object);
+        if (!object->is_sleeping) {
+            dynamic_object_update(object);
+        }
 
         collision_scene_recalc_bb(object, &prev_pos[i]);
     }
@@ -469,13 +525,24 @@ void collision_scene_collide() {
 
         struct dynamic_object* object = (struct dynamic_object*)element->object;
 
-        if (object->is_fixed) {
+        if (object->is_fixed || object->is_sleeping) {
             continue;
         }
 
         collision_scene_collide_single(element->object, &prev_pos[i]);
 
+        object->active_contacts = collision_remove_duplicate_contacts(object->active_contacts);
+
         bool is_grounded = dynamic_object_get_ground(object) != NULL;
+
+        if (is_grounded && vector3DistSqrd(object->position, &prev_pos[i]) < SLEEP_MOVE_THRESHOLD * SLEEP_MOVE_THRESHOLD) {
+            object->sleep_counter += 1;
+
+            if (object->sleep_counter >= SLEEP_FRAME_THRESHOLD) {
+                object->is_sleeping = 1;
+                object->sleep_counter = 0;
+            }
+        }
 
         struct mesh_shadow_cast_result shadow;
         if (collision_scene_shadow_cast(object->position, &shadow)) {

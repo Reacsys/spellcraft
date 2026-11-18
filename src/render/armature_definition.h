@@ -2,7 +2,10 @@
 #define __RENDER_ARMATURE_DEFINITION_H__
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <t3d/t3d.h>
+
+#include "material.h"
 
 #define ARM_NO_PARENT_LINK  0xff
 
@@ -22,7 +25,11 @@ struct armature_definition {
     uint8_t image_frames_0;
     uint8_t image_frames_1;
     sprite_t** frames;
+    material_placeholder_block_definition_t* placeholders;
     uint16_t flags;
+    uint8_t placeholder_count;
 };
+
+typedef struct armature_definition armature_definition_t;
 
 #endif

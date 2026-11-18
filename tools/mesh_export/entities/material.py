@@ -6,6 +6,11 @@ import re
 import json
 from enum import Enum
 
+class ImageJsonProps():
+    def __init__(self):
+        self.palette: list[int] | None = None
+        self.fmt: str | None = None
+
 class PngMetadata():
     def __init__(self, filename):
         self.palette: list[int] | None = None
@@ -39,14 +44,24 @@ class PngMetadata():
             elif chunk_type == 'IHDR':
                 self.width = struct.unpack('>I', chunk_data[0:4])[0]
                 self.height = struct.unpack('>I', chunk_data[4:8])[0]
-                self.fmt = self._get_meta_format(filename) or self._get_format_from_png(chunk_data[8], chunk_data[9])
+                self.fmt = self._get_format_from_png(chunk_data[8], chunk_data[9])
             
             index += 8 + chunk_length + 4  # Move to next chunk (including CRC)
-        
-        if self.fmt == 'FMT_CI4' or self.fmt == 'FMT_CI8':
+
+        meta_data = self._get_meta(filename)
+
+        if meta_data.fmt:
+            self.fmt = meta_data.fmt
+
+        if meta_data.palette:
+            self.palette = meta_data.palette
+        elif self.fmt == 'FMT_CI4' or self.fmt == 'FMT_CI8':
             self.palette = self._get_palette_from_png(palette, transparency)
         else:
             self.palette = None
+
+        if meta_data.palette:
+            self.palette = meta_data.palette
 
     def _get_palette_from_png(self, palette, transparency):
         if not palette or len(palette) == 0:
@@ -55,17 +70,13 @@ class PngMetadata():
         result = []
 
         for index, entry in enumerate(palette):
-            r = entry[0]
-            g = entry[1]
-            b = entry[2]
-            a = transparency[index] if index < len(transparency) else 255
-
-            r5 = (r >> 3) & 0x1F  # 5 bits
-            g5 = (g >> 3) & 0x1F  # 5 bits
-            b5 = (b >> 3) & 0x1F  # 5 bits
-            a1 = (a >> 7) & 0x01  # 1 bit
-            
-            result.append((r5 << 11) | (g5 << 6) | (b5 << 1) | a1)
+            col = Color(
+                entry[0], 
+                entry[1], 
+                entry[2], 
+                transparency[index] if index < len(transparency) else 255
+            )
+            result.append(col.pack16())
 
         return result
 
@@ -94,13 +105,30 @@ class PngMetadata():
         
         return 'FMT_RGBA16'
 
-    def _get_meta_format(self, filename):
+    def _get_meta(self, filename) -> ImageJsonProps:
+        result = ImageJsonProps()
+
         json_filename = filename.replace('.png', '.json')
         if not os.path.isfile(json_filename):
-            return None
+            return result
         with open(json_filename, 'r') as file:
             metadata = json.load(file)
-        return 'FMT_' + metadata['format']
+
+        if 'format' in metadata:
+            result.fmt = 'FMT_' + metadata['format']
+
+        if 'palette' in metadata:
+            result.palette = []
+
+            for idx, el in enumerate(metadata['palette']):
+                col = _parse_color(el, f"palette[{str(idx)}]")
+
+                if col:
+                    result.palette.append(col.pack16())
+                else:
+                    result.palette.append(0)
+
+        return result
 
 class Color():
     def __init__(self, r, g, b, a):
@@ -114,6 +142,14 @@ class Color():
     
     def write(self, file):
         file.write(struct.pack('>BBBB', self.r, self.g, self.b, self.a))
+
+    def pack16(self):
+        r5 = (self.r >> 3) & 0x1F  # 5 bits
+        g5 = (self.g >> 3) & 0x1F  # 5 bits
+        b5 = (self.b >> 3) & 0x1F  # 5 bits
+        a1 = (self.a >> 7) & 0x01  # 1 bit
+        
+        return (r5 << 11) | (g5 << 6) | (b5 << 1) | a1
 
     def __eq__(self, value: object) -> bool:
         if not value or not isinstance(value, Color):
@@ -524,6 +560,22 @@ class OtherModes():
 class Palette():
     def __init__(self):
         self.colors: list[Color] = []
+
+class TexScrollType(Enum):
+    NONE = 0
+    LINEAR = 1
+    EASE_IN = 2
+    EASE_OUT = 3
+    EASE_IN_OUT = 4
+
+class TexScroll():
+    def __init__(self):
+        self.type: TexScrollType = TexScrollType.NONE
+        self.start: float = 0
+        self.end: float = 0
+        self.time: float = 0
+        self.phase_shift: float = 0
+        self.pingpong: bool = False
     
 class TexAxis():
     def __init__(self):
@@ -533,7 +585,7 @@ class TexAxis():
         self.clamp = False # was repeats
         self.mask = 0 # was repeats
         self.mirror = False
-        self.scroll = 0
+        self.scroll: TexScroll = TexScroll()
 
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, TexAxis):
@@ -574,6 +626,7 @@ class Tex():
         self.fmt = 'FMT_NONE'
         self.width = 128
         self.height = 128
+        self.use_texture_reference: bool = False
 
         self._png_metadata: PngMetadata | None = None
 
@@ -592,10 +645,11 @@ class Tex():
         result.width = self.width
         result.height = self.height
         result._png_metadata = self._png_metadata
+        result.use_texture_reference = self.use_texture_reference
         return result
     
     def does_scroll(self):
-        return self.s.scroll != 0 or self.t.scroll != 0
+        return self.s.scroll.type != TexScrollType.NONE or self.t.scroll.type != TexScrollType.NONE
     
     def set_filename(self, filename):
         self.filename = filename
@@ -641,16 +695,19 @@ class Tex():
         if not self.filename:
             return ""
         
-        if not self.filename.startswith('assets'):
+        # paths use \ on windows but rom paths always use /
+        filename = self.filename.replace('\\', '/')
+
+        if not filename.startswith('assets'):
             raise Exception('filename should be relative')
 
-        return f"rom:{self.filename[len('assets'):-len('.png')]}.sprite"
+        return f"rom:{filename[len('assets'):-len('.png')]}.sprite"
         
     def frame_filenames(self) -> list[str]:
         if not self.frames:
             return []
 
-        return list(map(lambda x: f"rom:{x[len('assets'):-len('.png')]}.sprite", self.frames))
+        return list(map(lambda x: f"rom:{x.replace(chr(92), '/')[len('assets'):-len('.png')]}.sprite", self.frames))
 
     def byte_size(self) -> int:
         return _fmt_bit_size[self.fmt] * self.width * self.height // 8
@@ -680,6 +737,9 @@ class Tex():
 
         if self.palette != 0:
             result = f"{result} palette={self.palette}"
+
+        if self.use_texture_reference:
+            result = f"{result} tex_ref=True"
 
         return result
     
@@ -882,10 +942,10 @@ class Material():
     def is_empty(self):
         return self.combine_mode == None and self.other_modes == None and self.env_color == None and self.prim_color == None and \
             self.blend_color == None and self.lighting == None and self.tex0 == None and self.tex1 == None and self.culling == None and \
-            self.vtx_effect == None and self.fog == None and self.flags == None
+            self.vtx_effect == None and self.fog == None and self.flags == None and self.priority == None
 
     def __str__(self):
-        return f"""Material {self.name}: 
+        return f"""Material {self.name}: ({self.priority}) 
     microcode = {self.microcode.name}
     combine_mode = {self.combine_mode}
     other_modes = {self.other_modes}
@@ -1103,7 +1163,6 @@ def _parse_tex_axis(json_data, image_size, into: TexAxis, key_path):
     into.max = image_size << 2
     into.shift = _optional_number(json_data, 'shift', key_path, into.shift)
     into.mirror = _optional_boolean(json_data, 'mirror', key_path, False)
-    into.scroll = _optional_number(json_data, 'scroll', key_path, into.scroll)
 
     repeats = _optional_number(json_data, 'repeats', key_path, 2048)
     into.mask = log_pow_2(image_size)
@@ -1141,7 +1200,7 @@ def _parse_tex(json_data, key_path, relative_to):
         result.t.max = result.height << 2
         result.t.mask = log_pow_2(result.height)
     else:
-        if not 'filename' in json_data and not 'frames' in json_data:
+        if not 'filename' in json_data and not 'frames' in json_data and not 'useTextureReference' in json_data:
             raise Exception(f"{key_path}.filename or .frames must be defined")
         
         if 'filename' in json_data:
@@ -1168,6 +1227,14 @@ def _parse_tex(json_data, key_path, relative_to):
 
         if 'frames' in json_data:
             result.set_frames(list(map(lambda x: _resolve_tex(x, relative_to), json_data['frames'])))
+            
+        if 'useTextureReference' in json_data:
+            ref = json_data['useTextureReference']
+
+            result.use_texture_reference = True
+            result.width = ref['width']
+            result.height = ref['height']
+            result.fmt = ref['fmt']
 
     return result
 

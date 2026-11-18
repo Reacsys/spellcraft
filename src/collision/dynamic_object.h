@@ -6,6 +6,7 @@
 #include "../math/box3d.h"
 #include "../math/box2d.h"
 #include "./shapes/swing_shape.h"
+#include "collider_shape.h" 
 #include "contact.h"
 #include "gjk.h"
 #include <stdint.h>
@@ -27,29 +28,37 @@ enum collision_group {
     COLLISION_GROUP_PLAYER = 1,
 };
 
-typedef void (*bounding_box_calculator)(void* data, struct Vector2* rotation, struct Box3D* box);
-
-union dynamic_object_type_data
-{
-    struct { float radius; } sphere;
-    struct { float radius; float inner_half_height; } capsule;
-    struct { struct Vector3 half_size; } box;
-    struct { struct Vector3 size; } cone;
-    struct { float radius; float half_height; } cylinder;
-    struct { struct Vector2 range; float radius; float half_height; } sweep;
-    struct { struct swing_shape* shape; } swing;
+enum push_resistance {
+    PUSH_RESISTANCE_NONE,
+    PUSH_RESISTANCE_LIGHT,
+    PUSH_RESISTANCE_MED,
+    PUSH_RESISTANCE_HEAVY,
+    PUSH_RESISTANCE_IMMOBILE,
 };
+
+enum dynamic_density_class {
+    DYNAMIC_DENSITY_LIGHT,
+    DYNAMIC_DENSITY_MEDIUM,
+    DYNAMIC_DENSITY_NEUTRAL,
+    DYNAMIC_DENSITY_HEAVY,
+};
+
+typedef enum push_resistance push_resistance_t;
+
+typedef void (*bounding_box_calculator)(void* data, struct Vector2* rotation, struct Box3D* box);
 
 struct dynamic_object_type {
     MinkowsiSum minkowsi_sum;
     bounding_box_calculator bounding_box;
-    union dynamic_object_type_data data;
+    collider_shape_data_t data;
     float bounce;
     float friction;
     // 0 wont be stable on any slope, 1 will stick to anything not facing downward
     // or 1 - cos(slope angle)
     float max_stable_slope;
     uint16_t surface_type;
+    uint8_t push_resistance;
+    uint8_t density;
     struct Vector3 center;
 };
 
@@ -61,12 +70,7 @@ typedef struct dynamic_object_type dynamic_object_type_t;
 #define DYNAMIC_OBJECT_MARK_UNDER_WATER(object)         (object)->under_water = 2
 #define DYNAMIC_OBJECT_MARK_ICE_DASH(object)            (object)->has_ice_dash = 2
 
-enum dynamic_density_class {
-    DYNAMIC_DENSITY_LIGHT,
-    DYNAMIC_DENSITY_MEDIUM,
-    DYNAMIC_DENSITY_NEUTRAL,
-    DYNAMIC_DENSITY_HEAVY,
-};
+#define DYNAMIC_OBJECT_WAS_MARKED_UNDER_WATER(object)   ((object)->under_water == 2)
 
 enum dynamic_object_trigger_type {
     TRIGGER_TYPE_NONE,
@@ -95,19 +99,20 @@ struct dynamic_object {
     uint16_t has_gravity: 1;
     uint16_t trigger_type: 2;
     uint16_t is_fixed: 1;
-    uint16_t skip_mesh_collision;
+    uint16_t is_sleeping: 1;
+    uint16_t skip_mesh_collision: 1;
     uint16_t is_pushed: 2;
     uint16_t is_jumping: 2;
     uint16_t disable_friction: 2;
     uint16_t under_water: 2;
     uint16_t has_ice_dash: 2;
-    uint16_t density_class: 2;
     uint16_t weight_class: 3;
     uint16_t kill_plane_immune: 1;
     uint16_t hit_kill_plane: 1;
     uint16_t should_sweep_collide: 1;
     uint16_t collision_layers;
     uint16_t collision_group;
+    uint8_t sleep_counter;
     struct contact* active_contacts;
     struct contact* shadow_contact;
 };
@@ -144,5 +149,14 @@ void dynamic_object_set_scale(struct dynamic_object* object, float scale);
 
 #define DYNAMIC_OBJECT_NEEDS_OVERLAP(obj)   ((obj)->trigger_type != TRIGGER_TYPE_BASIC)
 #define DYNAMIC_OBJECT_SHOULD_PUSH(obj)     ((obj)->trigger_type == TRIGGER_TYPE_NONE)
+
+static inline void dynamic_object_wake(struct dynamic_object* object) {
+    object->is_sleeping = false;
+    object->sleep_counter = 0;
+}
+
+static inline void dynamic_object_sleep(struct dynamic_object* object) {
+    object->is_sleeping = true;
+}
 
 #endif

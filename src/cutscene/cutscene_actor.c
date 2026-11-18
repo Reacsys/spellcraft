@@ -53,7 +53,7 @@ void cutscene_actor_init(
     actor->animations.walk = animation_set_find_clip(actor->animation_set, "walk");
     actor->animations.run = animation_set_find_clip(actor->animation_set, "run");
 
-    animator_init(&actor->animator, armature ? armature->bone_count : 0);
+    animator_init(&actor->animator, armature ? armature->definition : NULL);
     actor->armature = armature;
     actor->target = gZeroVec;
     actor->animate_speed = 1.0f;
@@ -132,6 +132,8 @@ bool cutscene_actor_update(struct cutscene_actor* actor) {
     if (!cutscene_actor_is_moving(actor)) {
         return false;
     }
+    
+    dynamic_object_wake(&actor->collider);
 
     if (HAS_FLAG(actor->state, ACTOR_STATE_MOVING)) {
         struct Vector3 offset;

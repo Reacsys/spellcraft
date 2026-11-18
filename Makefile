@@ -69,11 +69,7 @@ MESH_SOURCES := $(shell find assets/meshes -type f -name '*.blend' | sort)
 TMESHES := $(MESH_SOURCES:assets/meshes/%.blend=filesystem/meshes/%.tmesh)
 
 filesystem/meshes/%.tmesh filesystem/meshes/%.anim: assets/meshes/%.blend tools/mesh_export/t3d_mesh.d.template
-	@mkdir -p $(dir $@)
-	@mkdir -p $(dir $(@:filesystem/meshes/%.tmesh=build/assets/meshes/%.tmesh))
-	$(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/t3d_mesh.py -- $(@:filesystem/meshes/%.tmesh=build/assets/meshes/%.tmesh)
-	$(MK_ASSET) -o $(dir $@) -w 256 $(@:filesystem/meshes/%.tmesh=build/assets/meshes/%.tmesh)
-	-cp $(@:filesystem/meshes/%.tmesh=build/assets/meshes/%.anim) $(@:%.tmesh=%.anim)
+	MK_ASSET=$(MK_ASSET) $(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/t3d_mesh.py
 
 assets/game_objects.json: tools/mesh_export/rebuild_prefabs.py $(EXPORT_SOURCE)
 	$(BLENDER_5) --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/rebuild_prefabs.py -- assets/game_objects.json
@@ -94,9 +90,7 @@ filesystem/%.mat: assets/%.mat.json tools/mesh_export/material.d.template
 	$(MK_ASSET) -o $(dir $@) -w 4 $(@:filesystem/%.mat=build/assets/%.mat)
 
 filesystem/%.mat: assets/%.mat.blend tools/mesh_export/material_fast64.d.template
-	@mkdir -p $(dir $@)
-	@mkdir -p $(dir $(@:filesystem/%.mat=build/assets/%.mat))
-	$(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/material_fast64.py -- $@
+	MK_ASSET=$(MK_ASSET) $(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/material_fast64.py
 
 list_materials: $(MATERIALS)
 	echo $(MATERIALS)
@@ -175,12 +169,7 @@ SCENES := $(SCENE_SOURCES:assets/scenes/%.blend=filesystem/scenes/%.scene)
 
 .SECONDEXPANSION:
 filesystem/scenes/%.scene: assets/scenes/%.blend $$(wildcard assets/scenes/%.script) build/assets/scripts/globals.json build/cutscene/function_defs.json tools/mesh_export/scene.d.template
-	@mkdir -p $(dir $@)
-	@mkdir -p $(dir $(@:filesystem/scenes/%.scene=build/assets/scenes/%.scene))
-	echo $@ $<
-	$(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/scene.py -- $(@:filesystem/scenes/%.scene=build/assets/scenes/%.scene) $(@:%.scene=%.overworld)
-	$(MK_ASSET) -o $(dir $@) -w 256 $(@:filesystem/scenes/%.scene=build/assets/scenes/%.scene)
-	-cp $(@:filesystem/scenes/%.scene=build/assets/scenes/%.sanim) $(@:%.scene=%.sanim)
+	MK_ASSET=$(MK_ASSET) $(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/scene.py
 
 filesystem/scenes/%.overworld build/assets/scenes/%.json: filesystem/scenes/%.scene;
 
@@ -190,6 +179,24 @@ build/assets/scenes/%_exits.txt: assets/scenes/%.blend tools/mesh_export/find_ex
 
 all_exits: $(SCENE_SOURCES:assets/scenes/%.blend=build/assets/scenes/%_exits.txt)
 .PHONY: all_exits
+
+###
+# cam_anim
+###
+
+CANIM_SOURCES := $(shell find assets/cam_anim -type f -name '*.blend' | sort)
+
+CANIM := $(CANIM_SOURCES:assets/cam_anim/%.blend=filesystem/cam_anim/%.canim)
+
+.SECONDEXPANSION:
+filesystem/cam_anim/%.canim: assets/cam_anim/%.blend
+	@mkdir -p $(dir $@)
+	@mkdir -p $(dir $(@:filesystem/cam_anim/%.canim=build/assets/cam_anim/%.canim))
+	echo $@ $<
+	$(BLENDER_5) $< --background --log-level fatal --addons fast64-main,mesh_export --python-exit-code 1 --python tools/mesh_export/cam_anim.py -- $(@:filesystem/cam_anim/%.canim=build/assets/cam_anim/%.canim)
+	$(MK_ASSET) -o $(dir $@) -w 256 $(@:filesystem/cam_anim/%.canim=build/assets/cam_anim/%.canim)
+	-cp $(@:filesystem/cam_anim/%.canim=build/assets/cam_anim/%.sanim) $(@:%.canim=%.sanim)
+
 
 ###
 # microcode
@@ -218,7 +225,10 @@ build/blender_results.txt: $(EXPORT_SOURCE)
 # source code
 ###
 
-SOURCES := $(shell find src/ ! -name '*_test.c' ! -name 'main.c' ! -name 'inventory_mapping.c' -type f -name '*.c' | sort) src/player/inventory_mapping.c
+src/entity/fields.h src/entity/fields.c: tools/type_field_checker.py src/scene/scene_definition.h
+	python3 tools/type_field_checker.py src/scene/scene_definition.h src/entity/fields.c
+
+SOURCES := $(shell find src/ ! -name '*_test.c' ! -name 'main.c' ! -name 'inventory_mapping.c' ! -name 'fields.c' -type f -name '*.c' | sort) src/player/inventory_mapping.c src/entity/fields.c
 SOURCE_OBJS := $(SOURCES:src/%.c=$(BUILD_DIR)/%.o)
 UCODES := $(shell find src/ -type f -name '*.S' | sort)
 UCODE_OBJS := $(UCODES:src/%.S=$(BUILD_DIR)/%.o)
@@ -228,9 +238,9 @@ TEST_SOURCES := $(shell find src/ -type f -name '*_test.c' | sort)
 TEST_SOURCE_OBJS := $(TEST_SOURCES:src/%.c=$(BUILD_DIR)/%.o)
 TEST_OBJS := $(SOURCE_OBJS) $(TEST_SOURCE_OBJS) $(UCODE_OBJS)
 
-filesystem/: $(SPRITES) $(TMESHES) $(MATERIALS) $(SCENES) $(REPAIRS) $(FONTS) $(SCRIPTS_COMPILED) $(SOUND_EFFECTS) $(MUSIC) filesystem/scripts/globals.dat
+filesystem/: $(SPRITES) $(TMESHES) $(MATERIALS) $(SCENES) $(CANIM) $(REPAIRS) $(FONTS) $(SCRIPTS_COMPILED) $(SOUND_EFFECTS) $(MUSIC) filesystem/scripts/globals.dat
 
-$(BUILD_DIR)/spellcraft.dfs: filesystem/ $(SPRITES) $(TMESHES) $(MATERIALS) $(SCENES) $(REPAIRS) $(FONTS) $(SCRIPTS_COMPILED) $(SOUND_EFFECTS) $(MUSIC) filesystem/scripts/globals.dat
+$(BUILD_DIR)/spellcraft.dfs: filesystem/ $(SPRITES) $(TMESHES) $(MATERIALS) $(SCENES) $(CANIM) $(REPAIRS) $(FONTS) $(SCRIPTS_COMPILED) $(SOUND_EFFECTS) $(MUSIC) filesystem/scripts/globals.dat
 $(BUILD_DIR)/spellcraft.elf: $(OBJS)
 $(BUILD_DIR)/spellcraft_test.elf: $(TEST_OBJS)
 

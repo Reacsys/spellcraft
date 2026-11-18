@@ -11,6 +11,8 @@
 #include "../render/animator.h"
 #include "../cutscene/cutscene_actor.h"
 #include "../effects/drop_shadow.h"
+#include "camera_controller.h"
+#include "camera_animation.h"
 
 #include "../spell/projectile.h"
 #include "../spell/spell_exec.h"
@@ -26,16 +28,21 @@
 #define CLIMB_UP_COUNT              3
 
 enum player_state {
+    PLAYER_START,
     PLAYER_GROUNDED,
     PLAYER_SLIDING,
     PLAYER_JUMPING,
     PLAYER_FALLING,
+    PLAYER_HANGING,
     PLAYER_SWIMMING,
     PLAYER_KNOCKBACK,
     PLAYER_GETTING_UP,
+    PLAYER_DROP_TO_HANG,
     PLAYER_CLIMBING_UP,
     PLAYER_CARRY,
+    PLAYER_MEDITATE,
     PLAYER_DIE,
+    PLAYER_DISABLED,
 };
 
 enum player_animation {
@@ -47,6 +54,8 @@ enum player_animation {
     PLAYER_ANIMATION_ATTACK_HOLD,
     PLAYER_ANIMATION_AIR_DASH,
     PLAYER_ANIMATION_TAKE_DAMAGE,
+    
+    PLAYER_ANIMATION_ATTACK_GROUND,
     
     PLAYER_ANIMATION_TREAD_WATER,
     PLAYER_ANIMATION_SWIM,
@@ -68,6 +77,12 @@ enum player_animation {
     PLAYER_ANIMATION_CLIMB_UP_0,
     PLAYER_ANIMATION_CLIMB_UP_1,
     PLAYER_ANIMATION_CLIMB_UP_2,
+
+    PLAYER_ANIMATION_DROP_TO_HANG,
+    PLAYER_ANIMATION_CLIMB_FROM_HANG,
+    PLAYER_ANIMATION_HANG,
+    
+    PLAYER_ANIMATION_CLIMB_FROM_WATER,
     
     PLAYER_ANIMATION_CARRY_PICKUP,
     PLAYER_ANIMATION_CARRY_IDLE,
@@ -75,7 +90,13 @@ enum player_animation {
     PLAYER_ANIMATION_CARRY_WALK,
     PLAYER_ANIMATION_CARRY_DROP,
 
+    PLAYER_ANIMATION_THROW,
+
     PLAYER_ANIMATION_SLIDE_FORWARD,
+
+    PLAYER_ANIMATION_MEDITATE_START,
+    PLAYER_ANIMATION_MEDITATE_LOOP,
+    PLAYER_ANIMATION_MEDITATE_END,
 
     PLAYER_ANIMATION_DIE,
 
@@ -87,6 +108,8 @@ enum player_animation {
 
     PLAYER_ANIMATION_COUNT,
 };
+
+typedef enum player_animation player_animation_t;
 
 enum player_sound {
     PLAYER_SOUND_COUNT,
@@ -101,19 +124,44 @@ struct inventory_assets {
     struct tmesh* staffs[INV_STAFF_COUNT];
 };
 
+struct climb_up_data {
+    float max_climb_height;
+    float animation_height;
+    float start_jump_time;
+    float end_jump_time;
+    enum player_animation anim;
+};
+
+typedef struct climb_up_data climb_up_data_t;
+
 union state_data {
+    struct {
+        int ground_delay;
+    } start;
     struct {
         float timer;
         float y_velocity;
         struct Vector3 start_pos;
         struct Vector2 target_rotation;
-        uint8_t climb_up_index;
+        climb_up_data_t* climb_up_data;
     } climbing_up;
     struct {
         entity_id carrying;
         float carry_offset;
         bool should_carry;
     } carrying;
+    struct {
+        vector3_t climb_target;
+        float input_delay;
+    } hanging;
+    struct {
+        vector3_t climb_target;
+        vector2_t target_rotation;
+    } drop_to_hang;
+    struct {
+        scale_in_fade_out_t* glow_effect;
+        bool is_active;
+    } meditate;
 };
 
 typedef union state_data state_data_t;
@@ -121,7 +169,6 @@ typedef union state_data state_data_t;
 struct player {
     struct cutscene_actor cutscene_actor;
     struct renderable renderable;
-    struct Transform* camera_transform;
     struct health health;
 
     struct spell_data_source player_spell_sources[PLAYER_CAST_SOURCE_COUNT];
@@ -139,10 +186,10 @@ struct player {
 
     vector3_t last_good_footing;
     vector3_t last_footing_normal;
-    float coyote_time;
 
     enum player_state state;
     union state_data state_data;
+    uint16_t last_surface_type;
 
     struct spatial_trigger z_target_trigger;
     struct TransformSingleAxis z_target_transform;
@@ -151,15 +198,19 @@ struct player {
     entity_id z_target;
     entity_id hover_interaction;
 
+    camera_controller_t camera_controller;
+    camera_animation_list_t camera_animations;
 };
 
 typedef struct player player_t;
 
-void player_init(struct player* player, struct player_definition* definition, struct Transform* camera_transform);
+void player_init(struct player* player, struct player_definition* definition);
 
 void player_render(struct player* player, struct render_batch* batch);
 
 void player_destroy(struct player* player);
+
+player_t* player_get();
 
 static inline bool player_is_dead(struct player* player) {
     return player->state == PLAYER_DIE;
@@ -175,6 +226,13 @@ static inline vector2_t* player_get_rotation(struct player* player) {
 
 static inline vector3_t* player_get_velocity(struct player* player) {
     return &player->cutscene_actor.collider.velocity;
+}
+
+static inline void player_disable(player_t* player) {
+    player->state = PLAYER_DISABLED;
+    player->cutscene_actor.collider.is_fixed = true;
+    player->cutscene_actor.collider.collision_layers = 0;
+    player->renderable.hide = true;
 }
 
 #endif

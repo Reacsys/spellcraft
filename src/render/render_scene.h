@@ -31,6 +31,7 @@ struct render_scene {
 
 void render_scene_reset();
 
+void render_scene_render_renderable(void* data, struct render_batch* batch);
 void render_scene_render_renderable_single_axis(void* data, struct render_batch* batch);
 
 void render_scene_add(struct Vector3* center, float radius, render_scene_callback callback, void* data);
@@ -43,6 +44,11 @@ void render_scene_remove_renderable(struct renderable* renderable);
 void render_scene_add_step(render_step_callback callback, void* data);
 void render_scene_remove_step(void* data);
 
-void render_scene_render(struct Camera* camera, T3DViewport* viewport, struct frame_memory_pool* pool);
+void render_scene_render(T3DViewport* viewport, struct frame_memory_pool* pool);
+
+void render_scene_use_camera(camera_t* camera);
+void render_scene_remove_camera(camera_t* camera);
+
+camera_t* render_scene_active_camera();
 
 #endif

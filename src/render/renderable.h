@@ -19,7 +19,7 @@ struct renderable {
             animator_t* animator;
         } mesh_render;
         struct {
-            TPXParticle particle_data;
+            TPXParticleS8 particle_data;
             render_batch_particles_t particles;
             material_pair_t* material;
             uint8_t frame_max_x;
@@ -29,7 +29,7 @@ struct renderable {
         } point_render;
     };
     enum transform_type type;
-    struct element_attr* attrs;
+    element_attr_t* attrs;
     uint16_t hide: 1;
 };
 
@@ -39,6 +39,8 @@ void renderable_init(struct renderable* renderable, struct Transform* transform,
 void renderable_single_axis_init(struct renderable* renderable, struct TransformSingleAxis* transform, const char* mesh_filename);
 
 void renderable_single_axis_init_direct(struct renderable* renderable, struct TransformSingleAxis* transform, struct tmesh* mesh);
+
+void renderable_set_mesh_direct(renderable_t* renderable, tmesh_t* mesh);
 
 void renderable_init_point(struct renderable* renderable, vector3_t* position, float radius, const char* material_filename);
 void renderable_destroy(struct renderable* renderable);

@@ -24,10 +24,10 @@
 #define MAX_ZOOM        2.0f
 #define MIN_ZOOM        0.25f
 
-#define MAP_X           20
+#define MAP_X           30
 #define MAP_Y           20
-#define MAP_SIZE        200
-
+#define MAP_WIDTH       260
+#define MAP_HEIGHT      200
 
 #define HEADER_FOOTER   0x4D415020
 
@@ -100,14 +100,14 @@ void menu_map_load(menu_map_t* map, FILE* file) {
     for (int i = 0; i < map->room_count; i += 1) {
         menu_map_room(&map->rooms[i], &data, file);
     }
+    
+    fread(&header_footer, sizeof(int), 1, file);
+    assert(header_footer == HEADER_FOOTER);
 
     map->outline_material = material_cache_load("rom:/materials/menu/map_mesh.mat");
     map->solid_color = material_cache_load("rom:/materials/menu/solid_primitive.mat");
     map->map_icon_material = material_cache_load("rom:/materials/menu/map_icons.mat");
     map->number_font_material = material_cache_load("rom:/materials/menu/number_font.mat");
-    
-    fread(&header_footer, sizeof(int), 1, file);
-    assert(header_footer == HEADER_FOOTER);
 
     int nbytes = 3;
     paragraph_test = rdpq_paragraph_build(&(rdpq_textparms_t){}, FONT_DIALOG, "0/1", &nbytes);
@@ -132,9 +132,9 @@ void menu_map_destroy(menu_map_t* map) {
 }
 
 static menu2d_vtx_t player_arrow[] = {
-    {.pos = {{{0.0f, -20.0f}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
-    {.pos = {{{10.0f, 20.0f}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
-    {.pos = {{{-10.0f, 20.0f}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
+    {.pos = {{{0, -20}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
+    {.pos = {{{10, 20}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
+    {.pos = {{{-10, 20}}}, .color = {0xFF, 0xFF, 0xFF, 0xFF}},
 };
 
 void menu_map_render_player(menu_map_t* map, menu_map_show_state_t* show_state) {
@@ -155,8 +155,9 @@ void menu_map_render_player(menu_map_t* map, menu_map_show_state_t* show_state) 
     menu_mtx(mtx, true, true);
 
     material_apply(&map->solid_color->apply);
-    rdpq_set_prim_register_raw((color_t){10, 200, 255, 255}, 0 , 0);
+    rdpq_set_prim_register_raw((color_t){10, 255, 100, 255}, 0 , 0);
     menu_vtx(player_arrow, 0, 3);
+    
     menu_tri(0, 1, 2);
     
     menu_mtx_pop(1);
@@ -372,7 +373,7 @@ void menu_map_show(menu_map_t* map, menu_map_show_state_t* show_state, uint16_t 
 
     int layer_index = room->min_layer;
 
-    for (int i = 0; i < room->layer_count; i += 1) {
+    for (int i = 0; i < room->layer_count && layer_index + 1 < map->layer_count; i += 1) {
         if (player_pos->y < room->max_layer_y[i]) {
             break;
         }
@@ -395,20 +396,20 @@ void menu_map_hide(menu_map_t* map, menu_map_show_state_t* show_state) {
 }
 
 void menu_map_render(menu_map_t* map, menu_map_show_state_t* show_state) {
-    menu_common_render_background(MAP_X, MAP_Y, MAP_SIZE, MAP_SIZE);
+    menu_common_render_background_transparent(MAP_X, MAP_Y, MAP_WIDTH, MAP_HEIGHT);
 
     if (!show_state->block) {
         return;
     }
     
-    menu_set_viewport(MAP_X, MAP_Y, MAP_X + MAP_SIZE, MAP_Y + MAP_SIZE);
-    rdpq_set_scissor(MAP_X, MAP_Y, MAP_X + MAP_SIZE, MAP_Y + MAP_SIZE);
+    menu_set_viewport(MAP_X, MAP_Y, MAP_X + MAP_WIDTH, MAP_Y + MAP_HEIGHT);
+    rdpq_set_scissor(MAP_X, MAP_Y, MAP_X + MAP_WIDTH, MAP_Y + MAP_HEIGHT);
 
     transform_2d_fp_t* mtx = frame_malloc(frame_pool_curr(), sizeof(transform_2d_fp_t));
 
     menu_transform_to_fixed(UncachedAddr(mtx), (transform_2d_t){
-        show_state->scale, 0.0f, (MAP_X + MAP_SIZE * 0.5f + SCALE_FACTOR * show_state->center.x * show_state->scale) * FIXED_POINT_SCALE,
-        0.0f, show_state->scale, (MAP_Y + MAP_SIZE * 0.5f + SCALE_FACTOR * show_state->center.y * show_state->scale) * FIXED_POINT_SCALE
+        show_state->scale, 0.0f, (MAP_X + MAP_WIDTH * 0.5f + SCALE_FACTOR * show_state->center.x * show_state->scale) * FIXED_POINT_SCALE,
+        0.0f, show_state->scale, (MAP_Y + MAP_HEIGHT * 0.5f + SCALE_FACTOR * show_state->center.y * show_state->scale) * FIXED_POINT_SCALE
     });
 
     menu_mtx((transform_2d_fp_t*)PhysicalAddr(mtx), true, true);
@@ -425,7 +426,7 @@ void menu_map_render(menu_map_t* map, menu_map_show_state_t* show_state) {
 
     // int16_t* tri_data = (int16_t*)(tmp + RSP_MENU_RDPQ_TRI_DATA);
 
-    // debugf("%d %d\n", ((int*)tmp)[0], *tri_data);
+    // debugf("%d %d\n", (int)tri_data[0], (int)tri_data[1]);
 
     // for (int i = 0; i < 8; i += 1) {
     //     debugf("%04x ", tmp[i]);

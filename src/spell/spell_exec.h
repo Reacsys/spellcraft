@@ -27,6 +27,7 @@
 #include "lightning_storm.h"
 #include "tidal_wave.h"
 #include "hurricane.h"
+#include "burst_attack.h"
 
 typedef uint32_t spell_slot_id;
 
@@ -45,6 +46,7 @@ union spell_exec_data {
     lightning_storm_t lightning_storm; 
     tidal_wave_t tidal_wave;
     hurricane_t hurricane;
+    burst_attack_t burst_attack;
 };
 
 enum spell_exec_slot_type {
@@ -63,6 +65,7 @@ enum spell_exec_slot_type {
     SPELL_EXEC_SLOT_TYPE_LIGHTNING_STORM,
     SPELL_EXEC_SLOT_TYPE_TIDAL_WAVE,
     SPELL_EXEC_SLOT_TYPE_HURRICANE,
+    SPELL_EXEC_SLOT_TYPE_BURST,
 };
 
 struct spell_exec_slot {
@@ -110,6 +113,9 @@ bool spell_exec_charge(struct spell_exec* exec);
 
 float spell_exec_max_mana(struct spell_exec* exec);
 float spell_exec_current_mana(struct spell_exec* exec);
-float spell_exec_prev_mana(struct spell_exec* exec);
+
+static inline mana_pool_t* spell_exec_get_pool(struct spell_exec* exec) {
+    return &exec->spell_sources.mana_pool;
+}
 
 #endif

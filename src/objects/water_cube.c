@@ -4,8 +4,13 @@
 #include "../collision/collide.h"
 #include "../time/time.h"
 #include "../math/mathf.h"
+#include "../water/water.h"
 
 #define MAX_MOVE_AMOUNT     10.0f
+
+#define VEL_POS_RATIO       64.0f
+#define HORZ_VEL_RATIO      0.05f
+#define MAX_DRAG            0.90f
 
 static float density_level[] = {
     [DYNAMIC_DENSITY_LIGHT] = GRAVITY_CONSTANT / 0.3f,
@@ -14,11 +19,9 @@ static float density_level[] = {
     [DYNAMIC_DENSITY_HEAVY] = GRAVITY_CONSTANT / 1.4f,
 };
 
-void water_cube_update(void* data) {
-    struct water_cube* cube = (struct water_cube*)data;
-
+void water_cube_apply_water(spatial_trigger_t* trigger, bool apply_sim) {
     for (
-        struct contact* current = cube->trigger.active_contacts;
+        struct contact* current = trigger->active_contacts;
         current;
         current = current->next
     ) {
@@ -28,7 +31,7 @@ void water_cube_update(void* data) {
             continue;
         }
 
-        float water_top = cube->trigger.bounding_box.max.y;
+        float water_top = trigger->bounding_box.max.y;
 
         if (obj->bounding_box.min.y >= water_top) {
             continue;
@@ -60,17 +63,42 @@ void water_cube_update(void* data) {
             continue;   
         }
 
+        if (DYNAMIC_OBJECT_WAS_MARKED_UNDER_WATER(obj)) {
+            // already has water physics
+            continue;
+        }
+
+        if (apply_sim) {
+            float offset = water_simuation_get_offset(&current->point);
+            water_top += offset;
+        }
+
         float underwater_ratio = obj->bounding_box.max.y <= water_top ? 
             1.0f : 
             (water_top - obj->bounding_box.min.y) / (obj->bounding_box.max.y - obj->bounding_box.min.y);
 
-        vector3Scale(&obj->velocity, &obj->velocity, mathfLerp(1.0f, 0.9f, underwater_ratio));
-        obj->velocity.y -= underwater_ratio * density_level[obj->density_class] * fixed_time_step;
+        float target_pos = VEL_POS_RATIO * (obj->velocity.y - (obj->velocity.x * obj->velocity.x + obj->velocity.z * obj->velocity.z) * HORZ_VEL_RATIO);
+
+        if (target_pos > 127.0f) {
+            target_pos = 127.0f;
+        } else if (target_pos < -127.0f) {
+            target_pos = -127.0f;
+        }
+
+        vector3Scale(&obj->velocity, &obj->velocity, mathfLerp(1.0f, MAX_DRAG, underwater_ratio));
+        obj->velocity.y -= underwater_ratio * density_level[obj->type->density] * fixed_time_step;
+        water_simulation_apply_impulse(&current->point, (obj->bounding_box.max.x - obj->bounding_box.min.x) * 0.5f, (int)target_pos);
 
         if (underwater_ratio > 0.5f) {
             DYNAMIC_OBJECT_MARK_UNDER_WATER(obj);
         }
     }
+}
+
+void water_cube_update(void* data) {
+    struct water_cube* cube = (struct water_cube*)data;
+
+    water_cube_apply_water(&cube->trigger, false);
 }
 
 void water_cube_init(struct water_cube* cube, struct water_cube_definition* definition, entity_id id) {

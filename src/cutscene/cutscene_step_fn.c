@@ -1,13 +1,16 @@
-#include "cutscene_step_fn.h"
-#include "../menu/hud.h"
-#include "../scene/scene.h"
-#include "../menu/dialog_box.h"
-#include "../time/time.h"
-#include "../time/game_mode.h"
-#include "../objects/empty.h"
-#include "../effects/image_overlay.h"
 #include "../effects/area_title.h"
 #include "../effects/fade_effect.h"
+#include "../effects/image_overlay.h"
+#include "../entities/comm_stone.h"
+#include "../menu/dialog_box.h"
+#include "../menu/hud.h"
+#include "../menu/tutorial_menu.h"
+#include "../objects/empty.h"
+#include "../render/fog.h"
+#include "../scene/scene.h"
+#include "../time/game_mode.h"
+#include "../time/time.h"
+#include "cutscene_step_fn.h"
 #include "cutscene_stopwatch.h"
 #include "cutscene_timer.h"
 #include "show_item.h"
@@ -22,6 +25,10 @@ static color_t fade_colors[] = {
     {0, 0, 0, 255},
     {255, 255, 255, 255},
 };
+
+static inline camera_controller_t* cutscene_get_camera_controller() {
+    return &current_scene->player.camera_controller;
+}
 
 cutscene_actor_t* cutscene_lookup_actor(cutscene_runner_context_t* context, entity_id input) {
     return cutscene_actor_find(cutscene_context_get_translate_entity(context, input));
@@ -184,7 +191,7 @@ void cutscene_camera_look_at_npc_init(cutscene_runner_context_t* context, int ar
 
     struct cutscene_actor* target = cutscene_lookup_actor(context, entity_id);
     if (target) {
-        camera_look_at(&current_scene->camera_controller, &target->transform.position);
+        camera_look_at(cutscene_get_camera_controller(), &target->transform.position);
         return;
     }
 
@@ -193,34 +200,68 @@ void cutscene_camera_look_at_npc_init(cutscene_runner_context_t* context, int ar
     if (obj) {
         vector3_t center;
         vector3Lerp(&obj->bounding_box.min, &obj->bounding_box.max, 0.5f, &center);
-        camera_look_at(&current_scene->camera_controller, &center);
+        camera_look_at(cutscene_get_camera_controller(), &center);
         return;
     }
 
     empty_t* empty = empty_find(entity_id);
 
     if (empty) {
-        camera_look_at(&current_scene->camera_controller, &empty->position);
+        camera_look_at(cutscene_get_camera_controller(), &empty->position);
         return;
     }
 }
 
 // cam_follow_player
 void cutscene_cam_follow_player_init(cutscene_runner_context_t* context, int arg_count) {
-    camera_follow_player(&current_scene->camera_controller);
+    camera_follow_player(cutscene_get_camera_controller());
 }
 
 // cam_return
 void cutscene_cam_return_init(cutscene_runner_context_t* context, int arg_count) {
-    camera_return(&current_scene->camera_controller);
+    camera_return(cutscene_get_camera_controller());
+}
+
+// cam_behind_player
+void cutscene_cam_behind_player_init(cutscene_runner_context_t* context, int arg_count) {
+    camera_behind_player(cutscene_get_camera_controller());
 }
 
 // cam_animate
 void cutscene_cam_anim_init(cutscene_runner_context_t* context, int arg_count) {
-    READ_ARGS(context, 1, arg_count, args);
+    READ_ARGS(context, 3, arg_count, args);
+
+    transform_sa_t relative_to;
+
+    dynamic_object_t* obj = collision_scene_find_object(args[1]);
+
+    if (obj) {
+        relative_to.position = *obj->position;
+
+        if (obj->rotation) {
+            relative_to.rotation = *obj->rotation;
+        } else {
+            relative_to.rotation = gRight2;
+        }
+
+        relative_to.scale = 1.0f;
+    } else {
+        transformSaInitIdentity(&relative_to);
+    }
+
+    camera_animation_t* animation = NULL;
+
+    animation = camera_animation_lookup(camera_animation_get(args[1]), (char*)args[0]);
+
+    if (!animation) {
+        animation = camera_animation_lookup(&current_scene->camera_animations, (char*)args[0]);
+    }
+
     camera_play_animation(
-        &current_scene->camera_controller, 
-        camera_animation_lookup(&current_scene->camera_animations, (char*)args[0])
+        cutscene_get_camera_controller(), 
+        animation,
+        obj ? &relative_to : NULL,
+        args[2]
     );
 }
 
@@ -228,7 +269,7 @@ void cutscene_cam_anim_init(cutscene_runner_context_t* context, int arg_count) {
 void cutscene_cam_move_to_init(cutscene_runner_context_t* context, int arg_count) {
     READ_ARGS(context, 4, arg_count, args);
     camera_move_to(
-        &current_scene->camera_controller, 
+        cutscene_get_camera_controller(), 
         (vector3_t*)args, 
         args[3], 
         false
@@ -239,7 +280,7 @@ void cutscene_cam_move_to_init(cutscene_runner_context_t* context, int arg_count
 void cutscene_cam_look_at_init(cutscene_runner_context_t* context, int arg_count) {
     READ_ARGS(context, 4, arg_count, args);
     camera_move_to(
-        &current_scene->camera_controller, 
+        cutscene_get_camera_controller(), 
         (vector3_t*)args, 
         args[3], 
         true
@@ -252,7 +293,7 @@ void cutscene_camera_wait_init(cutscene_runner_context_t* context, int arg_count
 }
 
 bool cutscene_camera_wait_step(cutscene_runner_context_t* context) {
-    return !camera_is_animating(&current_scene->camera_controller);
+    return !camera_is_animating(cutscene_get_camera_controller());
 }
 
 // interact_with_location
@@ -295,6 +336,194 @@ void cutscene_interact_with_position_init(cutscene_runner_context_t* context, in
         args[0],
         (vector3_t*)&args[2]
     );
+}
+
+// comm_stone
+
+static entity_id active_comm_stone = 0;
+static vector2_t rotate_amount = {
+    0.5f, 0.86f,
+};
+static fog_state_t comm_stone_fog = {
+    .color = {30, 10, 70, 255}, 
+    .min = 10.0f, 
+    .max = -2.0f,
+};
+
+#define COMM_END_HEIGHT         1.2f
+#define COMM_POS_OFFSET         1.5f
+#define CAMERA_DISTANCE         2.0f
+#define CAMERA_HEIGHT_OFFSET    -0.1f
+
+void cutscene_comm_stone_end_pos(vector3_t* result) {
+    struct comm_stone_definition stone_def;
+    
+    vector2_t* rot = player_get_rotation(&current_scene->player);
+
+    vector2ToLookDir(rot, result);
+    vector3Scale(result, result, COMM_POS_OFFSET);
+    vector3Add(player_get_position(&current_scene->player), result, result);
+
+    result->y += COMM_END_HEIGHT;
+}
+
+void cutscene_comm_stone_spawn() {
+    vector3_t target;
+    cutscene_comm_stone_end_pos(&target);
+
+    player_t* player = &current_scene->player;
+
+    vector3_t hand_position;
+    armature_transform_position(player->cutscene_actor.armature, 15, &gZeroVec, &hand_position);
+    transformSaTransformPoint(&player->cutscene_actor.transform, &hand_position, &hand_position);
+
+    struct comm_stone_definition stone_def;
+    stone_def.position = hand_position;
+    active_comm_stone = entity_spawn(ENTITY_TYPE_comm_stone, &stone_def);
+    comm_stone_t* stone = entity_get(active_comm_stone);
+
+    if (!stone) {
+        return;
+    }
+
+    comm_stone_activate(stone, &hand_position, &target);
+}
+
+
+void cutscene_comm_stone_start_init(cutscene_runner_context_t* context, int arg_count) {
+    assert(arg_count == 0);
+    
+    // just in case
+    if (active_comm_stone) {
+        entity_despawn(active_comm_stone);
+        active_comm_stone = 0;
+    }
+    
+    vector3_t target;
+    cutscene_comm_stone_end_pos(&target);
+
+    vector3_t* player_pos = player_get_position(&current_scene->player);
+
+    vector3_t camera_look;
+    camera_look.x = (target.x + player_pos->x) * 0.5f;
+    camera_look.y = target.y;
+    camera_look.z = (target.z + player_pos->z) * 0.5f;
+    camera_move_to(cutscene_get_camera_controller(), &camera_look, false, true);
+
+    vector2_t* rot = player_get_rotation(&current_scene->player);
+    vector3_t offset;
+    vector2ToLookDir(rot, &offset);
+
+    vector3_t camera_pos;
+    vector3RotateWith2(&offset, &rotate_amount, &camera_pos);
+    vector3AddScaled(&camera_look, &camera_pos, CAMERA_DISTANCE, &camera_pos);
+    camera_move_to(cutscene_get_camera_controller(), &camera_pos, false, false);
+
+    cutscene_actor_run_animation(&current_scene->player.cutscene_actor, "comm_stone_start", false);
+}
+
+bool cutscene_comm_stone_start_step(cutscene_runner_context_t* context) { 
+    if (active_comm_stone == 0) {
+        if (cutscene_actor_is_animating(&current_scene->player.cutscene_actor)) {
+            return false;
+        }
+
+        cutscene_comm_stone_spawn();
+        fog_set(FOG_PRIORITY_EFFECT, comm_stone_fog, 2.0f);
+        cutscene_actor_run_animation(&current_scene->player.cutscene_actor, "comm_stone_idle", true);
+    }
+    
+    comm_stone_t* stone = entity_get(active_comm_stone);
+
+    if (!stone) {
+        return true;
+    }
+
+    return !comm_stone_is_animating(stone);
+}
+
+void cutscene_comm_stone_end_init(cutscene_runner_context_t* context, int arg_count) {
+    assert(arg_count == 0);
+
+    comm_stone_t* stone = entity_get(active_comm_stone);
+
+    if (stone) {
+        comm_stone_deactivate(stone);
+        player_t* player = &current_scene->player;
+        armature_transform_position(player->cutscene_actor.armature, 4, &gZeroVec, &stone->from);
+        transformSaTransformPoint(&player->cutscene_actor.transform, &stone->from, &stone->from);
+    }
+
+    cutscene_actor_run_animation(&current_scene->player.cutscene_actor, "comm_stone_end", false);
+    camera_return(cutscene_get_camera_controller());
+    fog_clear(FOG_PRIORITY_EFFECT, 2.0f);
+}
+
+bool cutscene_comm_stone_end_step(cutscene_runner_context_t* context) { 
+    comm_stone_t* stone = entity_get(active_comm_stone);
+
+    if (!stone) {
+        return true;
+    }
+
+    if (comm_stone_is_animating(stone)) {
+        return false;
+    }
+
+    entity_despawn(active_comm_stone);
+    active_comm_stone = 0;
+    return true;
+}
+
+void cutscene_comm_cancel(cutscene_runner_context_t* context) {
+    entity_despawn(active_comm_stone);
+    active_comm_stone = 0;
+}
+
+// tutorial
+void cutscene_tutorial_init(cutscene_runner_context_t* context, int arg_count) {
+    READ_ARGS(context, 1, arg_count, args);
+    tutorial_set_step(args[0]);
+}
+
+// show_rune_upgrade
+void cutscene_show_rune_upgrade(cutscene_runner_context_t* context, int arg_count) {
+    READ_ARGS(context, 1, arg_count, args);
+    pause_menu_rune_upgrade(&current_scene->pause_menu, (inventory_item_type_t)args[0]);
+}
+
+// snap_to_pos
+void cutscene_snap_to_pos(cutscene_runner_context_t* context, int arg_count) {
+    READ_ARGS(context, 4, arg_count, args);
+
+    vector3_t* pos = (vector3_t*)(args+1);
+    
+    dynamic_object_t* obj = collision_scene_find_object(args[0]);
+
+    if (obj) {
+        *obj->position = *pos;
+    }
+}
+
+// snap_to_rot
+void cutscene_snap_to_rot(cutscene_runner_context_t* context, int arg_count) {
+    READ_ARGS(context, 3, arg_count, args);
+
+    vector2_t* rot = (vector2_t*)(args+1);
+    
+    dynamic_object_t* obj = collision_scene_find_object(args[0]);
+
+    if (obj && obj->rotation) {
+        *obj->rotation = *rot;
+    }
+}
+
+bool cutscene_tutorial_step(cutscene_runner_context_t* context) {
+    return !tutorial_is_running();
+}
+
+void cutscene_tutorial_cancel(cutscene_runner_context_t* context) {
+    tutorial_set_step(TUTORIAL_MENU_STATE_NONE);   
 }
 
 // npc_wait
@@ -443,20 +672,27 @@ static cutscene_step_fn_t function_steps[] = {
     [CUTSCENE_FN_NPC_SET_SPEED] = {.init = cutscene_set_npc_speed_init }, // func npc_set_speed(npc: entity_id, speed: float)
     [CUTSCENE_FN_INTERACT_POSITION] = {.init = cutscene_interact_with_position_init }, // func interact_with_position(interaction: i32, npc: entity_id, x: float, y: float, z: float)
     [CUTSCENE_FN_NPC_WAIT] = {.init = cutscene_npc_wait_init, .step = cutscene_npc_wait_step }, // func npc_wait(npc: entity_id)
+    [CUTSCENE_FN_NPC_ANIMATE] = {.init = cutscene_npc_animate_init }, // func npc_animate(npc: entity_id, animation: str, loop: bool)
     [CUTSCENE_FN_CAMERA_WAIT] = {.init = cutscene_camera_wait_init, .step = cutscene_camera_wait_step }, // func cam_wait()
     [CUTSCENE_FN_CAMERA_FOLLOW] = {.init = cutscene_cam_follow_player_init }, // func cam_follow()
     [CUTSCENE_FN_CAMERA_RETURN] = {.init = cutscene_cam_return_init }, // func cam_return()
+    [CUTSCENE_FN_CAMERA_BEHIND_PLAYER] = {.init = cutscene_cam_behind_player_init }, // func cam_behind_player()
     [CUTSCENE_FN_CAMERA_LOOK_AT_NPC] = {.init = cutscene_camera_look_at_npc_init }, // func cam_look_npc(target: entity_id)
     [CUTSCENE_FN_CAMERA_MOVE_TO] = {.init = cutscene_cam_move_to_init }, // func cam_move_to_pos(x: float, y: float, z: float, instant: bool)
     [CUTSCENE_FN_CAMERA_LOOK_AT_POS] = {.init = cutscene_cam_look_at_init }, // func cam_look_at_pos(x: float, y: float, z: float, instant: bool)
+    [CUTSCENE_FN_CAMERA_ANIMATE] = {.init = cutscene_cam_anim_init }, // func cam_animate(animation: str, relative_to: entity_id, blend_frames: i32)
     [CUTSCENE_FN_LOAD_SCENE] = {.init = cutscene_load_scene_init }, // func load_scene(scene_name: str)
     [CUTSCENE_FN_LOAD_FADE] = {.init = cutscene_fade_init }, // func fade(fade_to: i32, duration: float)
+    [CUTSCENE_FN_COMM_STONE_START] = {.init = cutscene_comm_stone_start_init, .step = cutscene_comm_stone_start_step}, // func comm_stone_start()
+    [CUTSCENE_FN_COMM_STONE_END] = {.init = cutscene_comm_stone_end_init, .step = cutscene_comm_stone_end_step, .cancel = cutscene_comm_cancel}, // func comm_stone_end()
+    [CUTSCENE_FN_TUTORIAL] = {.init = cutscene_tutorial_init, .step = cutscene_tutorial_step, .cancel = cutscene_tutorial_cancel}, // func tutorial(step: i32)
+    [CUTSCENE_FN_RUNE_UPGRADE] = { .init = cutscene_show_rune_upgrade }, // func show_rune_upgrade(inventory_type: i32)
+    [CUTSCENE_FN_SNAP_TO_POS]= { .init = cutscene_snap_to_pos }, // func snap_to_pos(target: entity_id, x: float, y: float, z: float)
+    [CUTSCENE_FN_SNAP_TO_ROT]= { .init = cutscene_snap_to_rot }, // func snap_to_rot(target: entity_id, x: float, y: float, z: float)
     {.init = cutscene_idle_npc_init }, // func idle_npc(npc: entity_id)
-    {.init = cutscene_cam_anim_init }, // func cam_animate(animation: str)
     {.init = cutscene_interact_with_location_init }, // func interact_with_location(interaction: i32, npc: entity_id, name: str)
     {.init = cutscene_show_title_init }, // func show_title(title: str)
     {.init = cutscene_look_at_subject_init }, // func look_at_subject()
-    {.init = cutscene_npc_animate_init }, // func npc_animate(npc: entity_id, animation: str, loop: bool)
     {.init = cutscene_print_init }, // func print(title: str)
     {.init = cutscene_spawn_init }, // func spawn(spawner: entity_spawner)
     {.init = cutscene_despawn_init }, // func despawn(entity: entity_id)

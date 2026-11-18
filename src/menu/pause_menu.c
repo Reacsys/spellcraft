@@ -35,6 +35,7 @@ void pause_menu_transition(struct pause_menu* pause_menu, enum active_menu targe
     switch (pause_menu->active_menu) {
         case ACTIVE_MENU_NONE:
             current_game_mode = GAME_MODE_TRANSITION_TO_MENU;
+            game_mode_blur_background();
             update_pause_layers(UPDATE_LAYER_WORLD | UPDATE_LAYER_DIALOG | UPDATE_LAYER_CUTSCENE);
             break;
         case ACTIVE_MENU_SPELL_BUILDING:
@@ -94,8 +95,9 @@ void pause_menu_update(struct pause_menu* pause_menu) {
 
     if (pressed.start) {
         if (pause_menu->active_menu == ACTIVE_MENU_NONE) {
-            pause_menu_transition(pause_menu, ACTIVE_MENU_SPELLS, NULL);
+            pause_menu_transition(pause_menu, pause_menu->prev_active_menu, NULL);
         } else {
+            pause_menu->prev_active_menu = pause_menu->active_menu;
             pause_menu_transition(pause_menu, ACTIVE_MENU_NONE, NULL);
         }
     } else if (pressed.r) {
@@ -108,12 +110,7 @@ void pause_menu_update(struct pause_menu* pause_menu) {
                 spell_building_menu_update(&pause_menu->spell_building_menu);
                 break;
             case ACTIVE_MENU_SPELLS: {
-                struct spell* edit_spell = spell_menu_update(&pause_menu->spell_menu);
-
-                if (edit_spell) {
-                    pause_menu_transition(pause_menu, ACTIVE_MENU_SPELL_BUILDING, edit_spell);
-                }
-
+                spell_menu_update(&pause_menu->spell_menu);
                 break;
             }
             case ACTIVE_MENU_INVENTORY:
@@ -135,6 +132,7 @@ void pause_menu_init(struct pause_menu* pause_menu) {
     menu_add_callback(pause_menu_render, pause_menu, MENU_PRIORITY_HUD);
     inventory_menu_init(&pause_menu->inventory_menu);
     pause_menu->active_menu = ACTIVE_MENU_NONE;
+    pause_menu->prev_active_menu = ACTIVE_MENU_SPELLS;
 }
 
 void pause_menu_destroy(struct pause_menu* pause_menu) {
@@ -142,4 +140,9 @@ void pause_menu_destroy(struct pause_menu* pause_menu) {
     spell_building_menu_destroy(&pause_menu->spell_building_menu);
     spell_menu_destroy(&pause_menu->spell_menu);
     menu_remove_callback(pause_menu);
+}
+
+void pause_menu_rune_upgrade(struct pause_menu* pause_menu, inventory_item_type_t rune) {
+    pause_menu_transition(pause_menu, ACTIVE_MENU_SPELLS, NULL);
+    spell_menu_show_rune_upgrade(&pause_menu->spell_menu, rune);
 }

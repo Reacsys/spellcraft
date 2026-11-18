@@ -4,6 +4,7 @@
 
 #include "resource/material_cache.h"
 #include "resource/sprite_cache.h"
+#include "resource/resource_cache.h"
 #include "render/camera.h"
 #include "math/transform.h"
 #include "savefile/savefile.h"
@@ -18,6 +19,7 @@
 #include "time/game_mode.h"
 #include "render/tmesh.h"
 #include "util/init.h"
+#include "util/rsp_timer.h"
 #include "util/screen_debug.h"
 #include "effects/area_title.h"
 #include "effects/fade_effect.h"
@@ -26,7 +28,10 @@
 #include "overworld/overworld_load.h"
 #include "render/z_clear.h"
 #include "render/defs.h"
+#include "profile/metrics.h"
 #include "profile/profile.h"
+#include "render/blur/blur.h"
+#include "render/render.h"
 
 #include <libdragon.h>
 #include <n64sys.h>
@@ -49,15 +54,16 @@ void setup() {
     fade_effect_set((color_t){0, 0, 0, 255}, 0.0f);
     fade_effect_set((color_t){0, 0, 0, 0}, 3.0f);
 
-    // scene_queue_next("rom:/scenes/fire_trials.scene#test");
-    // scene_queue_next("rom:/scenes/fire_trials.scene#test2");
+    // scene_queue_next("rom:/scenes/material_testing.scene");
+    scene_queue_next("rom:/scenes/fire_trials.scene#test");
+    // scene_queue_next("rom:/scenes/fire_trials.scene#bossdoor");
     // scene_queue_next("rom:/scenes/fire_trials.scene#test_firespinroom");
 	
-    scene_queue_next("rom:/scenes/fire_trials.scene");
+    // scene_queue_next("rom:/scenes/fire_trials.scene#default");
     // scene_queue_next("rom:/scenes/overworld_test.scene");
     // scene_queue_next("rom:/scenes/ability_testing.scene");
     // scene_queue_next("rom:/scenes/material_testing.scene");
-    // scene_queue_next("rom:/scenes/texture_stresstest.scene");
+    // scene_queue_next("rom:/scenes/textuare_stresstest.scene");
     // scene_queue_next("rom:/scenes/playerhome_basement.scene");
     // scene_queue_next("rom:/scenes/StartArea_ForestWest.scene#west");
     // scene_queue_next("rom:/scenes/StartArea_TempleOutside.scene");
@@ -88,9 +94,15 @@ void render_3d(surface_t* col, surface_t* z_buffer, struct frame_memory_pool* po
     }
     rdpq_set_color_image(col);
     rdpq_set_z_image(z_buffer);
-    // if ((current_scene && !current_scene->overworld) || ENABLE_LOD_RENDER_DEBUG) {
-        // t3d_screen_clear_color(RGBA32(0, 0, 0, 0));
-    // }
+
+    if (current_scene && (current_scene->clear_color.a > 128 || camera_is_touching_wall(&current_scene->player.camera_controller))) {
+        t3d_screen_clear_color(RGBA32(
+            current_scene->clear_color.r,
+            current_scene->clear_color.g,
+            current_scene->clear_color.b,
+            current_scene->clear_color.a
+        ));
+    }
     
     t3d_frame_start();
 
@@ -101,10 +113,7 @@ void render_3d(surface_t* col, surface_t* z_buffer, struct frame_memory_pool* po
     *viewport = t3d_viewport_create();
 
     if (current_scene) {
-        fog_state_t fog_state = fog_get();
-        rdpq_set_fog_color(fog_state.color);
-        t3d_fog_set_range(fog_state.min * WORLD_SCALE, fog_state.max * WORLD_SCALE);
-        render_scene_render(&current_scene->camera, viewport, frame_pool_curr());
+        render_scene_render(viewport, frame_pool_curr());
     }
 }
 
@@ -137,18 +146,34 @@ void render_menu(struct frame_memory_pool* pool) {
     screen_debug_render();
 }
 
+static float blur_strength_frames[] = {
+    0.1f,
+    0.15f,
+    0.2f,
+    0.3f,
+    0.4f,
+    0.6f,
+    0.8f,
+    1.0f,
+    1.0f,
+};
+
+#define BLUR_STRENGTH_COUNT     (sizeof(blur_strength_frames) / sizeof(blur_strength_frames[0]))
+
+uint8_t blur_frame_counter = BLUR_STRENGTH_COUNT;
+
+
 #if ENABLE_PROFILE_rsp
-static uint64_t render_start_time;
+    static timer_output_t rsp_timer_output;
+#endif
 
-void render_finish_callback(void* data) {
-    debugf("render: %f\n", (float)(get_ticks_us() - render_start_time) * 0.001f);
-}
-
+#if ENABLE_METRICS
+    static timer_output_t metrics_timer;
 #endif
 
 void render(surface_t* col, surface_t* zbuffer, struct frame_memory_pool* pool) {
 #if ENABLE_PROFILE_rsp
-    render_start_time = get_ticks_us();
+    rsp_timer_start(0);
 #endif
 
     update_render_time();
@@ -156,6 +181,11 @@ void render(surface_t* col, surface_t* zbuffer, struct frame_memory_pool* pool) 
     if (current_game_mode == GAME_MODE_3D || current_game_mode == GAME_MODE_TRANSITION_TO_MENU) {
         render_3d(col, zbuffer, pool);
     } else if (current_game_mode == GAME_MODE_MENU) {
+        if (blur_frame_counter < BLUR_STRENGTH_COUNT) {
+            blur_buffer(pause_background->buffer, blur_strength_frames[blur_frame_counter]);
+            blur_frame_counter += 1;
+        }
+
         static surface_t background;
         background = surface_make_linear(pause_background->buffer, FMT_RGBA16, pause_background->width, pause_background->height);
         rdpq_sync_pipe();
@@ -164,8 +194,14 @@ void render(surface_t* col, surface_t* zbuffer, struct frame_memory_pool* pool) 
         rdpq_tex_blit(&background, 0, 0, NULL);
     }
     render_menu(pool);
+
+    render_parity = render_parity ^ 0x1;
+
 #if ENABLE_PROFILE_rsp
-    rdpq_call_deferred(render_finish_callback, NULL);
+    rsp_timer_end(0, &rsp_timer_output);
+#endif
+#if ENABLE_PROFILE_rsp
+    debugf("render = %f\n", rsp_timer_output_ms(&rsp_timer_output));
 #endif
 }
 
@@ -210,16 +246,87 @@ void step_simulation() {
     SC_PROFILE_END(main, update_dispatch);
 }
 
+static int buffer_count = 3;
+static resolution_t custom_res = {SCREEN_WD, SCREEN_HT, false};
+
+bool render_frame(surface_t* zbuffer) {
+    if (current_game_mode == GAME_MODE_TRANSITION_TO_MENU) {
+        buffer_count = 2;
+        display_change(custom_res, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
+
+        surface_t* fb = display_get();
+        
+        frame_memory_pool_t* pool = frame_pool_curr();
+        frame_pool_reset(pool);
+
+        rdpq_attach(fb, zbuffer);
+
+        render_3d(pause_background, zbuffer, pool);
+        rdpq_sync_pipe();
+
+        // copy the frame buffer into the z buffer
+        // to be used as the background while the game
+        // is paused
+        rdpq_set_color_image_raw(
+            0, 
+            PhysicalAddr(pause_background->buffer), 
+            FMT_RGBA16, 
+            pause_background->width, 
+            pause_background->height, 
+            pause_background->stride
+        );
+        
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER_TEX);
+        rdpq_tex_blit(pause_background, 0, 0, NULL);
+
+        rdpq_sync_pipe();
+        rdpq_set_color_image(fb);
+
+        render_menu(pool);
+
+        rdpq_detach_show();
+
+        current_game_mode = GAME_MODE_MENU;
+        
+        frame_pool_next();
+
+        return true;
+    }
+
+    if (buffer_count == 2 && current_game_mode == GAME_MODE_3D) {
+        display_change(custom_res, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE);
+    }
+
+    surface_t* fb = display_try_get();
+
+    if (!fb) {
+        return false;
+    }
+        
+    frame_memory_pool_t* pool = frame_pool_curr();
+    frame_pool_reset(pool);
+
+    rdpq_attach(fb, zbuffer);
+
+    render(fb, zbuffer, pool);
+
+    rdpq_detach_show();
+
+    frame_pool_next();
+
+    return true;
+}
+
+void* zbuffer_data;
+
 int main(void)
 {
-	resolution_t custom_res = {SCREEN_WD, SCREEN_HT, false};
-
 	if (get_tv_type() == 0) //TEMP: if PAL, adjust vertical res
 	{
 		custom_res.height = 288;
 	}
 
-    int buffer_count = 3;
     display_init(custom_res, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE);
     // display_set_fps_limit(30.0f);
 	// *(volatile uint32_t*)0xA4400000 |= 0x300; //disables resampling on the VI
@@ -230,6 +337,7 @@ int main(void)
     joypad_init();
 
     surface_t zbuffer = surface_alloc(FMT_RGBA16, custom_res.width, custom_res.height);
+    zbuffer_data = zbuffer.buffer;
 
 #if DEBUG_ENABLED
     debug_init_usblog();
@@ -241,6 +349,14 @@ int main(void)
 #endif
 
     setup();
+
+#if ENABLE_PROFILE_rsp || ENABLE_METRICS
+    rsp_timer_init();
+#endif
+
+#if ENABLE_METRICS
+    metrics_init();
+#endif
     
     register_VI_handler(on_vi_interrupt);
 
@@ -249,12 +365,16 @@ int main(void)
 #endif
 
     while(1) {
+        // runs before check_scene_load so sweeps are still queued on scene loads
+        resource_cache_update();
         savefile_check_autosave();
         if (current_scene && current_scene->overworld) {
             SC_PROFILE_START(main);
             overworld_check_unload_queue(current_scene->overworld);
             SC_PROFILE_END(main, overworld_check_unload_queue);
         }
+
+        incremental_loader_process_queue(TICKS_FROM_MS(2));
 
         while (vi_delay > 0) {}
 
@@ -268,76 +388,33 @@ int main(void)
 
         SC_PROFILE_START(main);
 
-        if (current_game_mode == GAME_MODE_TRANSITION_TO_MENU) {
-            buffer_count = 2;
-            display_change(custom_res, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
+#if ENABLE_METRICS
+        metric_cpu_start(PERFORMANCE_METRIC_RENDER_TIME);
+        rsp_timer_start(1);
+#endif
 
-            surface_t* fb = display_get();
-            
-            frame_memory_pool_t* pool = frame_pool_curr();
-            frame_pool_reset(pool);
-
-            rdpq_attach(fb, &zbuffer);
-
-            render_3d(pause_background, &zbuffer, pool);
-            rdpq_sync_pipe();
-
-            // copy the frame buffer into the z buffer
-            // to be used as the background while the game
-            // is paused
-            rdpq_set_color_image_raw(
-                0, 
-                PhysicalAddr(pause_background->buffer), 
-                FMT_RGBA16, 
-                pause_background->width, 
-                pause_background->height, 
-                pause_background->stride
-            );
-            
-            rdpq_set_mode_standard();
-            rdpq_mode_combiner(RDPQ_COMBINER_TEX);
-            rdpq_tex_blit(fb, 0, 0, NULL);
-
-            rdpq_sync_pipe();
-            rdpq_set_color_image(fb);
-
-            render_menu(pool);
-
-            rdpq_detach_show();
-
-            current_game_mode = GAME_MODE_MENU;
-            
-            frame_pool_next();
-        } else {
-            if (buffer_count == 2 && current_game_mode == GAME_MODE_3D) {
-                display_change(custom_res, DEPTH_16_BPP, 3, GAMMA_NONE, FILTERS_RESAMPLE);
-            }
-
-            surface_t* fb = display_try_get();
-
-            if (fb) {            
-                frame_memory_pool_t* pool = frame_pool_curr();
-                frame_pool_reset(pool);
-
-                rdpq_attach(fb, &zbuffer);
-
-                render(fb, &zbuffer, pool);
-
-                rdpq_detach_show();
-
-                frame_pool_next();
-            } 
+        if (render_frame(&zbuffer)) {
+#if ENABLE_METRICS
+            metric_cpu_end(PERFORMANCE_METRIC_RENDER_TIME);
+            rsp_timer_end(1, &metrics_timer);
+            metric_set(PERFORMANCE_METRIC_RSP_TIME, rsp_timer_output_ms(&metrics_timer));
+#endif
         }
         
         SC_PROFILE_END(main, render);
-
+#if ENABLE_METRICS
+        metric_cpu_start(PERFORMANCE_METRIC_UPDATE_TIME);
+#endif
         for (int it = 0; it < update_count; it += 1) {
             SC_PROFILE_START(main);
             joypad_poll();
             struct Vector3 right;
-            if (current_scene) {
-                quatMultVector(&current_scene->camera.transform.rotation, &gRight, &right);
-                audio_update_listener(&current_scene->camera.transform.position, &right);
+
+            camera_t* camera = render_scene_active_camera();
+
+            if (camera) {
+                quatMultVector(&camera->transform.rotation, &gRight, &right);
+                audio_update_listener(&camera->transform.position, &right);
             } else {
                 audio_update_listener(&gZeroVec, &gRight);
             }
@@ -358,5 +435,18 @@ int main(void)
 
             SC_PROFILE_END(main, update);
         }
+    
+#if ENABLE_METRICS
+        metric_cpu_end(PERFORMANCE_METRIC_UPDATE_TIME);
+        heap_stats_t stats;
+        sys_get_heap_stats(&stats);
+
+        if (is_memory_expanded()) {
+            stats.total -= 1024 * 1024 * 4;
+        }
+        
+        metric_set(PERFORMANCE_METRIC_RAM, (float)stats.used / (float)stats.total);
+        metric_set(PERFORMANCE_METRIC_RAM_FRAG, (float)stats.fragmented / (float)stats.total);
+#endif
     }
 }

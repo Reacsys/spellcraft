@@ -7,8 +7,10 @@
 #include "../time/time.h"
 #include "../math/mathf.h"
 
-#define MAX_DISTANCE    3.0f
-#define FADE_DISTANCE   2.0f
+#define MAX_DISTANCE        3.0f
+#define FADE_DISTANCE       2.0f
+
+#define MAX_FADE_PER_FRAME  16
 
 #define room_portal_other_room(portal, room)    ((portal)->room_a == (room) ? (portal)->room_b : (portal)->room_a)
 
@@ -33,7 +35,7 @@ void room_portal_update(void* data) {
 
     struct Vector3 local_offset = room_portal_distance(portal, &current_scene->player.cutscene_actor.transform.position);
     float player_distance = local_offset.z;
-    float camera_distance = room_portal_distance(portal, &current_scene->camera.transform.position).z;
+    float camera_distance = room_portal_distance(portal, &render_scene_active_camera()->transform.position).z;
 
     
     int side_a = player_distance > 0.0f;
@@ -45,17 +47,39 @@ void room_portal_update(void* data) {
         distance = 0.0f;
     }
 
-    int should_fade = distance < MAX_DISTANCE;
+    bool should_fade = distance < MAX_DISTANCE;
+    uint8_t target_alpha = 255;
 
     if (should_fade) {
         float alpha = (distance - FADE_DISTANCE) * (1.0f / (MAX_DISTANCE - FADE_DISTANCE));
         if (alpha < 0.0f) {
             alpha = 0.0f;
         }
-        portal->attrs[0].color = (color_t){0, 0, 0, (uint8_t)(255.0f * alpha)};
+
+        target_alpha = (uint8_t)(255.0f * alpha);
+
+        if (scene_is_showing_room(current_scene, portal->room_a) && scene_is_showing_room(current_scene, portal->room_b)) {
+            int current_alpha = portal->attrs[0].color.a;
+
+            if (current_alpha < target_alpha) {
+                current_alpha = target_alpha;
+            } else if (current_alpha > target_alpha) {
+                current_alpha -= MAX_FADE_PER_FRAME;
+
+                if (current_alpha < target_alpha) {
+                    current_alpha = target_alpha;
+                }
+            }
+
+            portal->attrs[0].color = (color_t){0, 0, 0, current_alpha};
+        } else {
+            portal->attrs[0].color = (color_t){0, 0, 0, 255};
+        }
     }
 
-    if (!portal->did_fade && should_fade) {
+    bool did_fade = portal->last_target_alpha < 255;
+
+    if (!did_fade && should_fade) {
         if (scene_is_showing_room(current_scene, portal->room_a)) {
             scene_show_room(current_scene, portal->room_b);
             portal->current_room = portal->room_a;
@@ -63,20 +87,23 @@ void room_portal_update(void* data) {
             scene_show_room(current_scene, portal->room_a);
             portal->current_room = portal->room_b;
         }
-    } else if (portal->did_fade && !should_fade) {
+    } else if (did_fade && !should_fade) {
         scene_hide_room(current_scene, room_portal_other_room(portal, portal->current_room));
         portal->attrs[0].color = (color_t){0, 0, 0, 255};
     }
+
+    portal->renderable.hide = portal->attrs[0].color.a == 0;
     
     if (portal->last_player_distance) {
         if (side_a != last_side_a &&
             fabsf(local_offset.x) < portal->transform.scale.x &&
             fabsf(local_offset.y) < portal->transform.scale.x) {
+            incremental_loader_flush_queue();
             portal->current_room = room_portal_other_room(portal, portal->current_room);
         }
     }
 
-    portal->did_fade = should_fade;
+    portal->last_target_alpha = target_alpha;
 
     if (player_distance != 0.0f) {
         portal->last_player_distance = player_distance;
@@ -88,7 +115,7 @@ void room_portal_init(struct room_portal* portal, struct room_portal_definition*
     vector3Scale(&gOneVec, &scale, definition->scale);
     transformInit(&portal->transform, &definition->position, &definition->rotation, &scale);
 
-    renderable_init(&portal->renderable, &portal->transform, "rom:/meshes/objects/room_portal.tmesh");
+    renderable_init(&portal->renderable, &portal->transform, definition->mesh);
     render_scene_add_renderable(&portal->renderable, definition->scale * 1.4f);
     update_add(portal, room_portal_update, UPDATE_PRIORITY_EFFECTS, UPDATE_LAYER_WORLD);
     
@@ -101,7 +128,7 @@ void room_portal_init(struct room_portal* portal, struct room_portal_definition*
 
     portal->renderable.attrs = portal->attrs;
     portal->last_player_distance = 0.0f;
-    portal->did_fade = false;
+    portal->last_target_alpha = 255;
 }
 
 void room_portal_destroy(struct room_portal* portal) {

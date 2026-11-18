@@ -32,6 +32,7 @@ void element_emitter_activate(struct element_emitter* element_emitter) {
     );
     element_emitter->dynamic_object.scale = element_emitter->effect_definition->scale;
     element_emitter->dynamic_object.trigger_type = TRIGGER_TYPE_BASIC;
+    dynamic_object_wake(&element_emitter->dynamic_object);
     collision_scene_add(&element_emitter->dynamic_object);
 }
 
@@ -42,7 +43,13 @@ void element_emitter_init(struct element_emitter* element_emitter, struct spell_
     element_emitter->effect = NULL;
     element_emitter->is_active = true;
 
-    if (!effect_definition->cast_animation || !spell_data_source_request_animation(source, effect_definition->cast_animation)) {
+    bool is_animating = spell_data_source_request_animation(source, effect_definition->cast_animation);
+
+    if (is_animating) {
+        source->flags.source = SPELL_CAST_SOURCE_STAFF;
+    }
+
+    if (!effect_definition->cast_animation || !is_animating) {
         element_emitter_activate(element_emitter);
     }
 }

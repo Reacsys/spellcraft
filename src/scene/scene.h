@@ -5,11 +5,10 @@
 #include "../render/camera.h"
 #include "../render/tmesh.h"
 #include "../collision/mesh_collider.h"
+#include "../resource/incremental_loader.h"
 
 #include "../player/player.h"
 #include "../overworld/overworld.h"
-#include "camera_controller.h"
-#include "camera_animation.h"
 #include "../entity/entity_spawner.h"
 #include "../particles/static_particles.h"
 #include "../cutscene/cutscene.h"
@@ -18,9 +17,7 @@
 #include "../menu/map.h"
 #include "../audio/audio.h"
 
-struct static_entity {
-    struct tmesh tmesh;
-};
+struct scene;
 
 struct loading_zone {
     struct Box3D bounding_box;
@@ -33,11 +30,6 @@ struct named_location {
     struct Vector3 position;
     struct Vector2 rotation;
     uint16_t room_index;
-};
-
-struct static_entity_range {
-    uint16_t start;
-    uint16_t end;
 };
 
 struct room_entity_block {
@@ -80,10 +72,32 @@ struct loaded_entity {
 
 typedef struct loaded_entity loaded_entity_t;
 
+enum loaded_room_state {
+    LOADED_ROOM_STATE_UNUSED,
+    LOADED_ROOM_STATE_LOADING,
+    LOADED_ROOM_STATE_LOADED,
+};
+
+typedef enum loaded_room_state loaded_room_state_t;
+
+typedef struct {
+    tmesh_t tmesh;
+    vector3_t center;
+} room_static_entry_t;
+
 struct loaded_room {
+    uint16_t state;
     uint16_t room_index;
     uint16_t entity_count;
+    uint16_t static_count;
+    uint16_t static_particle_count;
+    room_static_entry_t* static_entries;
+    // entity definitions and shared entity references read from the .room file
+    room_entity_block_t entity_block;
+    static_particles_t* static_particles;
     loaded_entity_t* entities;
+    mesh_collider_t mesh_collider;
+    struct scene* scene;
 };
 
 typedef struct loaded_room loaded_room_t;
@@ -100,6 +114,7 @@ struct scene_fog {
 struct room_metadata {
     uint16_t cutscene_fn;
     boolean_variable has_visited;
+    char* name;
 };
 
 typedef struct room_metadata room_metadata_t;
@@ -107,16 +122,7 @@ typedef struct room_metadata room_metadata_t;
 typedef struct scene_fog scene_fog_t;
 
 struct scene {
-    struct static_entity* static_entities;
-    struct static_entity_range* room_static_ranges;
-    static_particles_t* static_particles;
-    struct static_entity_range* room_particle_ranges;
-
-    struct mesh_collider mesh_collider;
-
     struct player player;
-    struct Camera camera;
-    struct camera_controller camera_controller;
 
     struct pause_menu pause_menu;
     struct hud hud;
@@ -132,13 +138,11 @@ struct scene {
     menu_map_t map;
 
     scene_fog_t fog;
+    color_t clear_color;
 
-    room_entity_block_t* room_entities;
     shared_entity_block_t shared_entities;
 
     uint16_t room_count;
-    uint16_t static_entity_count;
-    uint16_t static_particles_count;
     uint16_t loading_zone_count;
     uint16_t named_location_count;
     uint8_t next_loaded_room_cutscene;
@@ -150,6 +154,8 @@ struct scene {
     uint16_t last_room;
 
     room_metadata_t* room_metadata;
+
+    wav64_t* music;
 
     cutscene_t* cutscene;
     char* string_table;
@@ -169,8 +175,14 @@ void scene_queue_next(const char* scene_name);
 void scene_clear_next();
 const char* scene_last_loaded();
 
+incremental_step_result_t scene_room_load_incremental(incremental_loader_t* loader, incremental_loader_step_t* step);
+
 bool scene_show_room(struct scene* scene, int room_index);
 void scene_hide_room(struct scene* scene, int room_index);
+
+// hot reloads .room files for the rooms this scene has loaded
+void scene_register_hot_reload(struct scene* scene);
+void scene_unregister_hot_reload(struct scene* scene);
 
 void scene_spawn_entity(struct scene* scene, entity_spawner spawner);
 

@@ -23,14 +23,17 @@
 
 #define MINION_DELAY_TIMER      10
 
-#define DEFAULT_LAUNCH_SPEED    6.0f
-
 #define ATTACK_DELAY_FRAMES     (3 * 30)
 
+#define SHOOT_ATTACK_OFFSET     2.0f
+#define SHOOT_ATTACK_OFFSET_COUNT   5
+#define MIN_SHOOT_ATTACK        10.0f
 #define BITE_ATTACK_RANGE       3.0f
 #define BITE_ATTACK_ACCEL       2.0f
 #define DASH_ACCEL              8.0f
 #define MAX_DASH_SPEED          20.0f
+
+#define DEFAULT_LAUNCH_SPEED    6.0f
 
 #define MAX_CHANGE_TIME         4.0f
 
@@ -83,6 +86,14 @@ static struct damage_source aoe_attack = {
     .amount = 10.0f,
     .type = DAMAGE_TYPE_KNOCKBACK,
     .knockback_strength = damage_knockback_with_time(1.0f),
+};
+
+static vector2_t shoot_offsets[SHOOT_ATTACK_OFFSET_COUNT] = {
+    {0.0f, 1.0f},
+    {0.7f, 0.7f},
+    {1.0f, 0.0f},
+    {0.7f, -0.7f},
+    {0.0f, -1.0f},
 };
 
 contact_t* jelly_king_find_target(struct jelly_king* jelly_king) {
@@ -233,7 +244,7 @@ void jelly_king_idle(struct jelly_king* jelly_king) {
             } else {
                 jelly_king_start_dash(jelly_king);
             }
-        } else if (jelly_king_can_fire_minion(jelly_king)) {
+        } else if (distanceSq > MIN_SHOOT_ATTACK * MIN_SHOOT_ATTACK && jelly_king_can_fire_minion(jelly_king)) {
             jelly_king_fire_minions(jelly_king, 3);
         }
     }
@@ -298,6 +309,26 @@ void jelly_king_bite_attack(struct jelly_king* jelly_king) {
     }
 }
 
+void jelly_king_apply_target_offset(struct jelly_king* jelly_king, vector3_t* offset) {
+    vector2_t offset_2d;
+
+    offset_2d.x = offset->x;
+    offset_2d.y = offset->z;
+
+    vector2Normalize(&offset_2d, &offset_2d);
+
+    vector2ComplexMul(&offset_2d, &shoot_offsets[jelly_king->next_lauch_offset], &offset_2d);
+
+    offset->x += offset_2d.x * SHOOT_ATTACK_OFFSET;
+    offset->z += offset_2d.y * SHOOT_ATTACK_OFFSET;
+
+    jelly_king->next_lauch_offset += 1;
+
+    if (jelly_king->next_lauch_offset == SHOOT_ATTACK_OFFSET_COUNT) {
+        jelly_king->next_lauch_offset = 0;
+    }
+}
+
 void jelly_king_fire_jelly(struct jelly_king* jelly_king) {
     int jelly_index = -1;
 
@@ -317,64 +348,24 @@ void jelly_king_fire_jelly(struct jelly_king* jelly_king) {
     if (jelly_index == -1) {
         return;
     }
-
-    struct jelly_definition definition;
-    definition.position = *cutscene_actor_get_pos(&jelly_king->cutscene_actor);
-    definition.rotation = *cutscene_actor_get_rot(&jelly_king->cutscene_actor);
-
-    jelly_king->minion[jelly_index] = entity_spawn(ENTITY_TYPE_jelly, &definition);
-
-    if (!jelly_king->minion[jelly_index]) {
-        return;
-    }
-
+    
     struct contact* nearest_target = jelly_king_find_target(jelly_king);
 
-    struct Vector3 attack_velocity;
+    struct Vector3 offset;
 
     if (nearest_target) {
-        // 0 = s * t + 1/2 * g * t * t
-        // d = s * t
-
-        // t = (d / s)
-
-        // 0 = s * (d / s) + 0.5 * g * d*d/(s*s)
-        // 0 = d + 0.5 * g * d*d/(s*s)
-        // -d = 0.5 * g * d*d/(s*s)
-        // s*s = -0.5 * g * d
-        // s = sqrt(-0.5 * g * d)
-
-
-        // s = sqrt(-g * 0.5 * distance)
-        // vh = offset * s / distance
-        // vv = s
-        
-        struct Vector3 offset;
         vector3Sub(&nearest_target->point, cutscene_actor_get_pos(&jelly_king->cutscene_actor), &offset);
-        float distance = sqrtf(vector3MagSqrd2D(&offset));
-
-        if (distance < 0.01f) {
-            attack_velocity = gZeroVec;
-        } else {
-            float speed = sqrtf((-GRAVITY_CONSTANT * 0.5f) * distance);
-            float distance_inv = speed / distance;
-            
-            attack_velocity.x = offset.x * distance_inv;
-            attack_velocity.y = speed;
-            attack_velocity.z = offset.z * distance_inv;
-        }
-
+        jelly_king_apply_target_offset(jelly_king, &offset);
     } else {
-        vector2ToLookDir(cutscene_actor_get_rot(&jelly_king->cutscene_actor), &attack_velocity);
-        vector3Scale(&attack_velocity, &attack_velocity, DEFAULT_LAUNCH_SPEED);
-        attack_velocity.y = DEFAULT_LAUNCH_SPEED;
+        vector2ToLookDir(cutscene_actor_get_rot(&jelly_king->cutscene_actor), &offset);
+        vector3Scale(&offset, &offset, DEFAULT_LAUNCH_SPEED);
     }
-    
-    jelly_launch_attack(
-        entity_get(jelly_king->minion[jelly_index]), 
-        &attack_velocity, 
-        jelly_king->cutscene_actor.collider.collision_group, 
-        nearest_target ? nearest_target->other_object : 0
+
+    jelly_king->minion[jelly_index] = jelly_launch_at(
+        cutscene_actor_get_pos(&jelly_king->cutscene_actor),
+        &offset,
+        nearest_target ? nearest_target->other_object : 0,
+        jelly_king->cutscene_actor.collider.collision_group
     );
 }
 
@@ -399,10 +390,6 @@ void jelly_king_attack_aiming(struct jelly_king* jelly_king) {
     if (cutscene_actor_is_animating_clip(&jelly_king->cutscene_actor, jelly_king->animations.attack_ranged)) {
         return;
     } else if (!cutscene_actor_is_animating(&jelly_king->cutscene_actor)) {
-        struct jelly* jelly = entity_get(jelly_king->minion[jelly_king->last_minion]);
-        if (jelly) {
-            jelly_reset_collision_group(jelly);
-        }
         cutscene_actor_run_clip(&jelly_king->cutscene_actor, jelly_king->animations.idle, 0.0f, true);
     }
 
@@ -485,6 +472,10 @@ float jelly_king_on_damage(void* data, struct damage_info* damage) {
     struct jelly_king* jelly_king = (struct jelly_king*)data;
 
     damage->knockback_strength *= 0.5f;
+
+    if (damage->type & DAMAGE_TYPE_FIRE) {
+        jelly_king_fire_jelly(jelly_king);
+    }
 
     if (jelly_king->state == JELLY_KING_IDLE) {
         jelly_king->state_data.idle.attack_timer = 0.0f;
@@ -600,6 +591,7 @@ void jelly_king_init(struct jelly_king* jelly_king, struct jelly_king_definition
 
     jelly_king->next_minion = 0;
     jelly_king->last_minion = 0;
+    jelly_king->next_lauch_offset = 0;
 
     health_init(&jelly_king->health, id, MAX_HEALTH);
     health_set_callback(&jelly_king->health, jelly_king_on_damage, jelly_king);

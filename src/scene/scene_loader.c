@@ -3,26 +3,29 @@
 #include <malloc.h>
 #include <string.h>
 #include <libdragon.h>
-#include "../resource/mesh_collider.h"
-#include "../resource/tmesh_cache.h"
-#include "../resource/material_cache.h"
-#include "../render/render_scene.h"
-#include "../render/fog.h"
-#include "../time/time.h"
+#include "../audio/audio.h"
+#include "../cutscene/cutscene_reference.h"
 #include "../cutscene/cutscene_runner.h"
 #include "../cutscene/evaluation_context.h"
 #include "../cutscene/expression_evaluate.h"
-#include "../cutscene/cutscene_reference.h"
-#include "../overworld/overworld_load.h"
-#include "../util/memory_stream.h"
 #include "../effects/area_title.h"
-#include "../render/defs.h"
-#include "../audio/audio.h"
 #include "../effects/fade_effect.h"
+#include "../overworld/overworld_load.h"
+#include "../render/defs.h"
+#include "../render/fog.h"
+#include "../render/render_scene.h"
+#include "../resource/material_cache.h"
+#include "../resource/mesh_collider.h"
+#include "../resource/tmesh_cache.h"
+#include "../resource/wav_cache.h"
+#include "../time/time.h"
+#include "../util/memory_stream.h"
 
 #include "../collision/collision_scene.h"
 
 #include "../entity/entity_spawner.h"
+
+#define DEBUG_MEMORY_USAGE      0
 
 // WRLD
 #define EXPECTED_HEADER 0x57524C44
@@ -56,13 +59,6 @@ bool scene_load_check_condition(FILE* file) {
     return result != 0;
 }
 
-void scene_load_static_particles(scene_t* scene, int room_count, FILE* file) {
-    scene->static_particles = static_particles_load(&scene->static_particles_count, file);
-
-    scene->room_particle_ranges = malloc(sizeof(struct static_entity_range) * room_count);
-    fread(scene->room_particle_ranges, sizeof(struct static_entity_range), room_count, file);
-}
-
 void scene_load_minimap(scene_t* scene, FILE* file) {
     int header;
     fread(&header, 4, 1, file);
@@ -80,51 +76,6 @@ void scene_load_fog(scene_fog_t* fog, FILE* file) {
     fread(&fog->min, 4, 1, file);
     fread(&fog->max, 4, 1, file);
     fread(&fog->color, 4, 1, file);
-}
-
-void scene_load_camera_animations(struct camera_animation_list* list, const char* filename, FILE* file) {
-    uint16_t count;
-    fread(&count, sizeof(count), 1, file);
-    camera_animation_list_init(list, count, 0);
-
-    int filename_len = strlen(filename);
-    char modified_filename[filename_len + 1];
-    strcpy(modified_filename, filename + strlen("rom:/"));
-    strcpy(modified_filename + filename_len - 10, "sanim");
-
-    list->rom_location = dfs_rom_addr(modified_filename);
-
-    for (int i = 0; i < count; ++i) {
-        uint8_t name_length;
-        fread(&name_length, 1, 1, file);
-        char* name = malloc(name_length + 1);
-        fread(name, name_length, 1, file);
-        name[name_length] = '\0';
-
-        struct camera_animation* animation = &list->animations[i];
-
-        animation->name = name;
-        fread(&animation->frame_count, sizeof(uint16_t), 1, file);
-        fread(&animation->rom_offset, sizeof(uint32_t), 1, file);
-        animation->rom_offset += list->rom_location;
-    }
-}
-
-room_entity_block_t* scene_load_entities(int room_count, FILE* file) {
-    room_entity_block_t* room_entities = malloc(sizeof(room_entity_block_t) * room_count);
-
-    for (int i = 0; i < room_count; i += 1) {
-        room_entity_block_t* room = &room_entities[i];
-        fread(&room->block_size, 2, 1, file);
-        room->block = room->block_size ? malloc(room->block_size) : NULL;
-        fread(room->block, room->block_size, 1, file);
-
-        fread(&room->shared_entity_count, 2, 1, file);
-        room->shared_entity_index = room->shared_entity_count ? malloc(room->shared_entity_count * sizeof(uint16_t)) : NULL;
-        fread(room->shared_entity_index, sizeof(uint16_t), room->shared_entity_count, file);
-    }
-
-    return room_entities;
 }
 
 void scene_load_shared_entities(shared_entity_block_t* shared_entities, FILE* file) {
@@ -186,6 +137,10 @@ void scene_load_room_metadata(scene_t* scene, FILE* file) {
     if (scene->room_count) {
         scene->room_metadata = malloc(sizeof(room_metadata_t) * scene->room_count);
         fread(scene->room_metadata, sizeof(room_metadata_t), scene->room_count, file);
+
+        for (int i = 0; i < scene->room_count; i += 1) {
+            scene->room_metadata[i].name += (int)scene->string_table;
+        }
     } else {
         scene->room_metadata = NULL;
     }
@@ -212,6 +167,22 @@ void scene_load_cutscene(struct scene* scene, FILE* file) {
     expression_set_scene_variables(scene->scene_vars);
 }
 
+void scene_load_music(scene_t* scene, FILE* file) {
+    uint8_t len;
+    fread(&len, 1, 1, file);
+
+    if (!len) {
+        scene->music = NULL;
+        return;
+    }
+
+    char filename[len + 1];
+    fread(filename, len, 1, file);
+    filename[len] = 0;
+
+    scene->music = wav_cache_load(filename);
+}
+
 void scene_destroy_room_metadata(scene_t* scene) {
     free(scene->room_metadata);
 }
@@ -225,11 +196,22 @@ void scene_destroy_cutscene(scene_t* scene) {
     expression_set_scene_variables(NULL);
 }
 
+void scene_destroy_music(scene_t* scene) {
+    if (scene->music) {
+        wav_cache_release(scene->music);
+    }
+}
+
 void scene_fade_in(struct cutscene* cutscene, void* data, cutscene_runner_context_t* context) {
     fade_effect_set((color_t){0, 0, 0, 0}, 0.5f);
 }
 
 struct scene* scene_load(const char* filename) {
+#if DEBUG_MEMORY_USAGE
+    heap_stats_t memory_before;
+    sys_get_heap_stats(&memory_before);
+#endif
+
     FILE* file = asset_fopen(filename, NULL);
 
     int header;
@@ -238,9 +220,11 @@ struct scene* scene_load(const char* filename) {
 
     struct scene* scene = malloc(sizeof(struct scene));
     current_scene = scene;
+    scene_time = 0.0f;
 
     for (int i = 0; i < MAX_LOADED_ROOM; i += 1) {
-        scene->loaded_rooms[i].room_index = ROOM_INDEX_NONE;
+        scene->loaded_rooms[i].state = LOADED_ROOM_STATE_UNUSED;
+        scene->loaded_rooms[i].room_index = ROOM_NONE;
     }
 
     scene->next_loaded_room_cutscene = 0;
@@ -308,36 +292,12 @@ struct scene* scene_load(const char* filename) {
     scene->last_despawn_check = 0;
 
     cutscene_actor_common_init();
-    camera_init(&scene->camera, DEFAULT_CAMERA_FOV, WORLD_NEAR_PLANE, WORLD_FAR_PLANE);
-    player_init(&scene->player, &player_def, &scene->camera.transform);
-    camera_controller_init(&scene->camera_controller, &scene->camera, &scene->player);
-    hud_init(&scene->hud, &scene->player, &scene->camera);
-
-    uint16_t static_count;
-    fread(&static_count, 2, 1, file);
-    scene->static_entity_count = static_count;
-
-    scene->static_entities = malloc(sizeof(struct static_entity) * static_count);
-
-    for (int i = 0; i < static_count; ++i) {
-        uint8_t str_len;
-        fread(&str_len, 1, 1, file);
-
-        struct static_entity* entity = &scene->static_entities[i];
-        tmesh_load(&scene->static_entities[i].tmesh, file);
-    }
+    player_init(&scene->player, &player_def);
+    hud_init(&scene->hud, &scene->player);
 
     uint16_t room_count;
     fread(&room_count, 2, 1, file);
     scene->room_count = room_count;
-
-    scene->room_static_ranges = malloc(sizeof(struct static_entity_range) * room_count);
-    fread(scene->room_static_ranges, sizeof(struct static_entity_range), room_count, file);
-
-    scene_load_static_particles(scene, room_count, file);
-
-    mesh_collider_load(&scene->mesh_collider, file);
-    collision_scene_add_static_mesh(&scene->mesh_collider);
 
     uint16_t strings_length;
     fread(&strings_length, 2, 1, file);
@@ -345,7 +305,6 @@ struct scene* scene_load(const char* filename) {
     scene->string_table = malloc(strings_length);
     fread(scene->string_table, strings_length, 1, file);
 
-    scene->room_entities = scene_load_entities(room_count, file);
     scene_load_shared_entities(&scene->shared_entities, file);
 
     scene_load_loading_zones(scene, file);
@@ -359,7 +318,7 @@ struct scene* scene_load(const char* filename) {
         scene->overworld = overworld_load(overworld_filename);
     } else {
         scene->overworld = NULL;
-        scene->camera.far = 100.0f;
+        scene->player.camera_controller.camera.far = 100.0f;
     }
 
     scene_load_minimap(scene, file);
@@ -369,10 +328,13 @@ struct scene* scene_load(const char* filename) {
 
     scene_load_fog(&scene->fog, file);
     fog_set(FOG_PRIORITY_SCENE, (fog_state_t){.color = scene->fog.color, .min = scene->fog.min, .max = scene->fog.max}, 0.0f);
+    fread(&scene->clear_color, sizeof(color_t), 1, file);
 
-    scene_load_camera_animations(&scene->camera_animations, filename, file);
+    camera_animations_load(&scene->camera_animations, filename, file);
 
     scene_load_room_metadata(scene, file);
+
+    scene_load_music(scene, file);
 
     scene_load_cutscene(scene, file);
 
@@ -381,30 +343,26 @@ struct scene* scene_load(const char* filename) {
     render_scene_add(NULL, 0.0f, scene_render, scene);
     update_add(scene, scene_update, UPDATE_PRIORITY_CAMERA, UPDATE_LAYER_WORLD | UPDATE_LAYER_CUTSCENE);
     pause_menu_init(&scene->pause_menu);
+    audio_play_music(scene->music);
 
     scene_show_room(scene, current_room);
+    incremental_loader_flush_queue();
+
+    scene_register_hot_reload(scene);
 
     if (starting_cutscene.type == CUTSCENE_REF_NONE) {
         fade_effect_set((color_t){0, 0, 0, 0}, 0.5f);
     } else {
         cutscene_ref_run_then_destroy(&starting_cutscene, 0, scene_fade_in, NULL);
     }
+    
+#if DEBUG_MEMORY_USAGE
+    heap_stats_t memory_after;
+    sys_get_heap_stats(&memory_after);
+    debugf("scene_load memory %f->%f  used %f\n", memory_before.used * (1.0f / 1024.f), memory_after.used * (1.0f / 1024.f), (memory_before.free - memory_after.free) * (1.0f / 1024.0f));
+#endif
 
     return scene;
-}
-
-void scene_release_particles(scene_t* scene) {
-    static_particles_release(scene->static_particles, scene->static_particles_count);
-    free(scene->room_particle_ranges);
-}
-
-void scene_release_room_entities(room_entity_block_t* room_entities, int room_count) {
-    for (int i = 0; i < room_count; i += 1) {
-        free(room_entities[i].block);
-        free(room_entities[i].shared_entity_index);
-    }
-
-    free(room_entities);
 }
 
 void scene_release_shared_entities(shared_entity_block_t* entities) {
@@ -420,39 +378,30 @@ void scene_release(struct scene* scene) {
         return;
     }
 
+    incremental_loader_flush_queue();
+
+    scene_unregister_hot_reload(scene);
+
     for (int i = 0; i < MAX_LOADED_ROOM; i += 1) {
         loaded_room_t* room = &scene->loaded_rooms[i];
 
-        if (room->room_index != ROOM_INDEX_NONE) {
+        if (room->state == LOADED_ROOM_STATE_LOADED) {
             scene_hide_room(scene, room->room_index);
         }
     }
 
-    scene_release_room_entities(scene->room_entities, scene->room_count);  
     scene_release_shared_entities(&scene->shared_entities);  
-
-    for (int i = 0; i < scene->static_entity_count; ++i) {
-        struct static_entity* entity = &scene->static_entities[i];
-        tmesh_release(&entity->tmesh);
-    }
-    free(scene->static_entities);
-    free(scene->room_static_ranges);
-
-    scene_release_particles(scene);
 
     render_scene_remove(scene);
     update_remove(scene);
+    audio_play_music(NULL);
 
     pause_menu_destroy(&scene->pause_menu);
     hud_destroy(&scene->hud);
     player_destroy(&scene->player);
-    camera_controller_destroy(&scene->camera_controller);
 
     inventory_destroy();
     cutscene_actor_common_destroy();
-
-    collision_scene_remove_static_mesh(&scene->mesh_collider);
-    mesh_collider_release(&scene->mesh_collider);
 
     if (scene->overworld) {
         overworld_free(scene->overworld);
@@ -473,6 +422,8 @@ void scene_release(struct scene* scene) {
     scene_destroy_room_metadata(scene);
 
     scene_destroy_cutscene(scene);
+
+    scene_destroy_music(scene);
 
     free(scene);
 

@@ -2,22 +2,29 @@
 #define __WATER_WATER_H__
 
 #include <stdint.h>
+#include <t3d/t3d.h>
+#include "../math/vector2s16.h"
+#include "../math/vector3s16.h"
+#include "../render/tmesh.h"
 
-struct water_simulation {
-    uint16_t width;
-    uint16_t height;
-    int16_t* velocity_buffer;
-    int16_t* position_buffers[2];
-    uint8_t read_buffer;
-    uint8_t y_stride;
-};
+void water_simulation_retain();
+void water_simulation_release();
 
-typedef struct water_simulation water_simulation_t;
+void water_simulation_enable_debug_render();
+void water_simulation_disable_debug_render();
 
-void water_simulation_init(water_simulation_t* simulation, int width, int height);
+void water_simulation_update();
 
-void water_simulation_update(water_simulation_t* simulation);
+bool water_simulation_apply(tmesh_t* mesh, vector3_t* position, vector3s16_t* local_min, vector3s16_t* local_max);
 
-void water_simulation_destroy(water_simulation_t* simulation);
+void water_simulation_apply_impulse_center(vector3_t* position);
+void water_simulation_apply_impulse(vector3_t* position, float radius, int8_t value);
+
+void water_simulation_rounded_position(vector3_t* input, vector2s16_t* output);
+
+void water_simulation_get_center(vector3_t* position);
+float water_simuation_get_offset(vector3_t* position);
+
+void* water_simulation_get_data();
 
 #endif

@@ -19,17 +19,24 @@
 #include "../audio/audio.h"
 #include "../cutscene/cutscene.h"
 #include "../cutscene/cutscene_runner.h"
+#include "../cutscene/globals.h"
+#include "../cutscene/global_list.h"
 #include "../effects/area_title.h"
 #include "../scene/scene.h"
+#include "../menu/tutorial_menu.h"
+#include "../water/water.h"
 
 #include "../effects/fade_effect.h"
 
 #define PLAYER_MAX_SPEED    4.2f
 
+#define PLAYER_MAX_SWIM_SPEED   2.2f
+#define PLAYER_SWIM_ACCEL       8.2f
+
 #define PLAYER_DASH_THRESHOLD   4.7f
-#define PLAYER_RUN_THRESHOLD    1.4f
+#define PLAYER_RUN_THRESHOLD    1.8f
 #define PLAYER_RUN_ANIM_SPEED   4.2f
-#define PLAYER_WALK_ANIM_SPEED  0.64f
+#define PLAYER_WALK_ANIM_SPEED  1.24f
 
 #define PLAYER_SLIDE_SPEED          2.0f
 #define PLAYER_SLIDE_ACCEL_SPEED    7.0f
@@ -37,16 +44,23 @@
 #define PLAYER_STRAFE_BLEND_FRAMES  8
 
 #define SLIDE_DELAY 0.25f
-#define COYOTE_TIME 0.1f
 #define SHADOW_AS_GROUND_DISTANCE   0.15f
 
 #define CARRY_GRAB_TIME   (11.0f / 30.0f)
-#define CARRY_DROP_TIME   (5.0f / 30.0f)
 #define CARRY_DROP_SPEED    3.2f
+#define CARRY_THROW_THRESHOLD   PLAYER_RUN_THRESHOLD
+#define CARRY_THROW_VEL         2.0f
+#define CARRY_THROW_VEL_VERT    4.0f
 
 #define INTERACT_Y_LOWER        -0.75f
 #define INTERACT_Y_UPEER        1.25f
 
+#define HANG_INPUT_DELAY        0.2f
+
+#define JUMP_SPEED_THRESHOLD    2.1f
+#define JUMP_OVERHANG_HEIGHT    0.4f
+
+#define MAX_MEDITATE_MANA       30.0f
 
 #define MAX_ROTATION_RATE       10.0f
 static struct Vector2 player_max_rotation;
@@ -56,35 +70,46 @@ static struct spatial_trigger_type player_z_trigger_shape = {
     SPATIAL_TRIGGER_WEDGE(15.0f, 7.0f, 0.707f, 0.707f),
 };
 
-struct climb_up_data {
-    float max_climb_height;
-    float animation_height;
-    float start_jump_time;
-    float end_jump_time;
-};
-
-typedef struct climb_up_data climb_up_data_t;
-
 static struct climb_up_data climb_up_data[CLIMB_UP_COUNT] = {
     {
         .max_climb_height = 0.8f,
         .animation_height = 0.4f,
         .start_jump_time = 14.0f / 30.0f,
         .end_jump_time = 23.0f / 30.0f,
+        .anim = PLAYER_ANIMATION_CLIMB_UP_0,
     },
     {
         .max_climb_height = 1.2f,
         .animation_height = 0.9f,
         .start_jump_time = 6.0f / 30.0f,
         .end_jump_time = 13.0f / 30.0f,
+        .anim = PLAYER_ANIMATION_CLIMB_UP_1,
     },
     {
         .max_climb_height = 2.1f,
         .animation_height = 1.4f,
         .start_jump_time = 6.0f / 30.0f,
         .end_jump_time = 13.0f / 30.0f,
+        .anim = PLAYER_ANIMATION_CLIMB_UP_1,
     },
 };
+
+static struct climb_up_data climb_from_hang_data = {
+    .max_climb_height = 1.6f,
+    .animation_height = 1.4f,
+    .start_jump_time = 0.0f,
+    .end_jump_time = 0.0f,
+    .anim = PLAYER_ANIMATION_CLIMB_FROM_HANG,
+};
+
+static struct climb_up_data climb_from_water_data = {
+    .max_climb_height = 2.7f,
+    .animation_height = 1.4f,
+    .start_jump_time = 6.0f / 30.0f,
+    .end_jump_time = 13.0f / 30.0f,
+    .anim = PLAYER_ANIMATION_CLIMB_FROM_WATER,
+};
+
 
 // about a 40 degree slope
 #define MAX_STABLE_SLOPE    0.219131191f
@@ -109,8 +134,15 @@ static struct cutscene_actor_def player_actor_def = {
         .center = {0.0f, 0.75f, 0.0f},
         .max_stable_slope = MAX_STABLE_SLOPE,
         .friction = 0.2f,
+        .density = DYNAMIC_DENSITY_MEDIUM,
     },
 };
+
+struct player_effect_resources {
+    tmesh_t* meditate_glow;
+};
+
+static struct player_effect_resources player_effects;
 
 void player_get_move_basis(struct Transform* transform, struct Vector3* forward, struct Vector3* right) {
     quatMultVector(&transform->rotation, &gForward, forward);
@@ -160,6 +192,18 @@ void player_run_clip_keep_translation(struct player* player, enum player_animati
         -1.0f / MODEL_SCALE,
         &player->cutscene_actor.transform.position
     );
+
+    quaternion_t relative_rotation;
+    quaternion_t inv_before;
+    quatConjugate(&before.rotation, &inv_before);
+    quatMultiply(&inv_before, &after.rotation, &relative_rotation);
+
+    vector3_t rotation_forward;
+    quatMultVector(&relative_rotation, &gForward, &rotation_forward);
+
+    vector2_t rotation;
+    vector2LookDir(&rotation, &rotation_forward);
+    vector2ComplexMul(&player->cutscene_actor.transform.rotation, &rotation, &player->cutscene_actor.transform.rotation);
 }
 
 float player_animation_time(struct player* player) {
@@ -168,6 +212,10 @@ float player_animation_time(struct player* player) {
 
 bool player_is_running(struct player* player, enum player_animation clip) {
     return animator_is_running_clip(&player->cutscene_actor.animator, player->animations[clip]);
+}
+
+bool player_is_running_any(struct player* player) {
+    return animator_is_running(&player->cutscene_actor.animator);
 }
 
 struct player_animation_args {
@@ -215,7 +263,13 @@ interactable_t* player_check_for_interactable(player_t* player, entity_id entity
 
     float curr_distance = vector3MagSqrd2D(&offset);
 
-    if (!interactable_is_in_range(interactable, curr_distance) || curr_distance > *distance || offset.y < INTERACT_Y_LOWER || offset.y > INTERACT_Y_UPEER) {
+    if (!(
+            interactable_is_in_range(interactable, curr_distance) || 
+            dynamic_object_find_contact(&player->cutscene_actor.collider, interactable->id)
+        ) || 
+        curr_distance > *distance || 
+        offset.y < INTERACT_Y_LOWER || 
+        offset.y > INTERACT_Y_UPEER) {
         return NULL;
     }
 
@@ -278,6 +332,25 @@ interactable_t* player_find_interactable(player_t* player, entity_id* entity) {
         result = interactable;
         *entity = curr->other_object;
     }
+
+    for (
+        contact_t* curr = player->cutscene_actor.collider.active_contacts;
+        curr;
+        curr = curr->next
+    ) {
+        if (!curr->other_object) {
+            continue;
+        }
+
+        interactable_t* interactable = player_check_for_interactable(player, curr->other_object, &curr->point, &distance);
+
+        if (!interactable) {
+            continue;
+        }
+
+        result = interactable;
+        *entity = curr->other_object;
+    }
     
     return result;
 }
@@ -288,7 +361,7 @@ void player_get_input_direction(struct player* player, struct Vector3* target_di
     struct Vector3 right;
     struct Vector3 forward;
 
-    player_get_move_basis(player->camera_transform, &forward, &right);
+    player_get_move_basis(&player->camera_controller.camera.transform, &forward, &right);
 
     struct Vector2 direction;
 
@@ -328,34 +401,54 @@ void player_handle_look(struct player* player, struct Vector3* look_direction) {
     player_look_towards(player, look_direction);
 }
 
-bool player_check_grab(struct player* player, struct Vector3* target_direction) {
-    if (grab_checker_update(&player->grab_checker, &player->cutscene_actor.collider, target_direction)) {
-        struct Vector3 target;
-        grab_checker_get_climb_to(&player->grab_checker, &target);
+#define MAX_VERTICAL_DELTA      0.01f
 
-        float height = target.y - player->cutscene_actor.transform.position.y;
+void player_enter_drop_to_hang(player_t* player) {
+    player->state = PLAYER_DROP_TO_HANG;
+    grab_checker_get_climb_to(&player->grab_checker, &player->state_data.drop_to_hang.climb_target);
+    player->state_data.drop_to_hang.target_rotation = player->grab_checker.target_rot;
+    player_run_clip(player, PLAYER_ANIMATION_DROP_TO_HANG);
+}
 
-        for (int i = 0; i < CLIMB_UP_COUNT; i += 1) {
-            climb_up_data_t* data = &climb_up_data[i];
-
-            if (height < data->max_climb_height) {
-                player_run_clip(player, PLAYER_ANIMATION_CLIMB_UP_0 + i);
-                player->state = PLAYER_CLIMBING_UP;
-                player->state_data.climbing_up.timer = 0.0f;
-                player->state_data.climbing_up.start_pos = player->cutscene_actor.transform.position;
-                player->state_data.climbing_up.climb_up_index = i;
-                player->state_data.climbing_up.y_velocity = (height - data->animation_height) / (data->end_jump_time - data->start_jump_time); 
-                
-                struct Vector3 offset;
-                vector3Sub(&target, &player->cutscene_actor.transform.position, &offset);
-                vector2LookDir(&player->state_data.climbing_up.target_rotation, &offset);
-
-                return true;
-            }
-        }
-    }
+bool player_check_grab(struct player* player, struct Vector3* target_direction, climb_up_data_t* climb_data_list, int climb_count) {
+    switch (grab_checker_update(&player->grab_checker, &player->cutscene_actor.collider, target_direction, climb_data_list[climb_count-1].max_climb_height)) {
+        case GRAB_MODE_CLIMB: {
+            struct Vector3 target;
+            grab_checker_get_climb_to(&player->grab_checker, &target);
     
-    return false;
+            float height = target.y - player->cutscene_actor.transform.position.y;
+    
+            for (int i = 0; i < climb_count; i += 1) {
+                climb_up_data_t* data = &climb_data_list[i];
+    
+                if (height < data->max_climb_height) {
+                    player_run_clip(player, data->anim);
+                    player->state = PLAYER_CLIMBING_UP;
+                    player->state_data.climbing_up.timer = 0.0f;
+                    player->state_data.climbing_up.start_pos = player->cutscene_actor.transform.position;
+                    player->state_data.climbing_up.climb_up_data = data;
+                    player->state_data.climbing_up.y_velocity = (height - data->animation_height) / (data->end_jump_time - data->start_jump_time); 
+                    
+                    struct Vector3 offset;
+                    vector3Sub(&target, &player->cutscene_actor.transform.position, &offset);
+                    vector2LookDir(&player->state_data.climbing_up.target_rotation, &offset);
+    
+                    return true;
+                }
+            }
+            return false;
+        }
+        case GRAB_MODE_HANG:
+            // player_enter_drop_to_hang(player);
+            return false;
+        default:
+            return false;
+    }
+}
+
+void player_enter_start(player_t* player) {
+    player->state = PLAYER_START;
+    player->state_data.start.ground_delay = 5;
 }
 
 void player_enter_slide_state(struct player* player, struct contact* ground_contact) {
@@ -363,19 +456,58 @@ void player_enter_slide_state(struct player* player, struct contact* ground_cont
     player_loop_animation(player, PLAYER_ANIMATION_SLIDE_FORWARD, 1.0f);
 }
 
+void player_enter_jump_state(struct player* player) {
+    player->state = PLAYER_JUMPING;
+    player_run_clip(player, PLAYER_ANIMATION_JUMP);
+    player->cutscene_actor.animator.blend_frames = 0;
+}
+
+void player_enter_climb_from_hang(struct player* player) {
+    player_run_clip(player, PLAYER_ANIMATION_CLIMB_FROM_HANG);
+    player->state = PLAYER_CLIMBING_UP;
+    player->state_data.climbing_up.timer = 0.0f;
+    player->state_data.climbing_up.start_pos = player->cutscene_actor.transform.position;
+    player->state_data.climbing_up.climb_up_data = &climb_from_hang_data;
+    player->state_data.climbing_up.y_velocity = 0.0f; 
+
+    player->state_data.climbing_up.target_rotation = player->cutscene_actor.transform.rotation;
+}
+
+void player_enter_hanging_state(struct player* player, vector3_t* hang_from) {
+    player->state = PLAYER_HANGING;
+    player->state_data.hanging.climb_target = *hang_from;
+    player->state_data.hanging.input_delay = HANG_INPUT_DELAY;
+    player_loop_animation(player, PLAYER_ANIMATION_HANG, 1.0f);
+}
+
 void player_enter_grounded_state(struct player* player, struct contact* ground_contact) {
-    player->coyote_time = 0.0f;
     player->state = PLAYER_GROUNDED;
     player->last_good_footing = player->cutscene_actor.transform.position;
 
     if (ground_contact) {
         player->last_footing_normal = ground_contact->normal;
+        player->last_surface_type = ground_contact->surface_type;
+    } else {
+        player->last_surface_type = SURFACE_TYPE_NONE;
     }
 }
 
 void player_enter_falling_state(struct player* player) {
     player->state = PLAYER_FALLING;
     player_run_clip(player, PLAYER_ANIMATION_JUMP_PEAK);
+}
+
+void player_enter_swimming_state(struct player* player) {
+    player->state = PLAYER_SWIMMING;
+    player_loop_animation(player, PLAYER_ANIMATION_TREAD_WATER, 1.0f);
+}
+
+void player_enter_meditate_state(struct player* player) {
+    player->state = PLAYER_MEDITATE;
+    player_run_clip(player, PLAYER_ANIMATION_MEDITATE_START);
+
+    player->state_data.meditate.glow_effect = NULL;
+    player->state_data.meditate.is_active = true;
 }
 
 static vector3_t local_camera_death_pos = {
@@ -444,34 +576,44 @@ void player_die(struct player* player) {
 enum player_ground_movement_result {
     GROUND_MOVEMENT_RESULT_GROUNDED,
     GROUND_MOVEMENT_RESULT_SLIDE,
+    GROUND_MOVEMENT_RESULT_JUMP,
     GROUND_MOVEMENT_RESULT_FALL,
 };
 
 enum player_ground_movement_result player_handle_ground_movement(struct player* player, struct contact* ground_contact, struct Vector3* target_direction, float* speed) {
-    contact_t fake_contact = {
-        .normal = player->last_footing_normal,
-        .point = player->cutscene_actor.transform.position,
-        .surface_type = SURFACE_TYPE_COYOTE,
-    };
+    dynamic_object_t* collider = &player->cutscene_actor.collider;
     
-    *speed = sqrtf(vector3MagSqrd2D(&player->cutscene_actor.collider.velocity));
+    *speed = sqrtf(vector3MagSqrd2D(&collider->velocity));
+    vector3_t* vel = &collider->velocity;
+    vector3_t* pos = &player->cutscene_actor.transform.position;
 
-    if (ground_contact) {
-        player->coyote_time = 0.0f;
-    } else if (player->coyote_time < COYOTE_TIME) {
-        player->coyote_time += fixed_time_step;
-        ground_contact = &fake_contact;
-    } else {
-        return GROUND_MOVEMENT_RESULT_FALL;
+    if (!ground_contact) {
+        contact_t* shadow_contact = player->cutscene_actor.collider.shadow_contact;
+        if (shadow_contact && player->last_surface_type == SURFACE_TYPE_STICKY) {
+            ground_contact = shadow_contact;
+            vector3ProjectPlane(vel, &shadow_contact->normal, vel);
+        } else if (vel->x * vel->x + vel->z * vel->z > JUMP_SPEED_THRESHOLD * JUMP_SPEED_THRESHOLD && (!shadow_contact || pos->y - shadow_contact->point.y > JUMP_OVERHANG_HEIGHT)) {
+            return GROUND_MOVEMENT_RESULT_JUMP;
+        } else {
+            return GROUND_MOVEMENT_RESULT_FALL;
+        }
     }
 
-    bool is_good_footing = ground_contact->other_object == 0 && ground_contact->surface_type != SURFACE_TYPE_COYOTE;
-    vector3_t* vel = &player->cutscene_actor.collider.velocity;
-    vector3_t* pos = &player->cutscene_actor.transform.position;
+    player->last_surface_type = ground_contact->surface_type;
+
+    bool is_good_footing = ground_contact->other_object == 0;
 
     if (dynamic_object_should_slide(MAX_STABLE_SLOPE, ground_contact->normal.y, ground_contact->surface_type)) {
         if (vel->x * ground_contact->normal.x + vel->z * ground_contact->normal.z > 0.0f) {
-            return GROUND_MOVEMENT_RESULT_SLIDE;
+            if (ground_contact->surface_type == SURFACE_TYPE_SLIPPERY) {
+                return GROUND_MOVEMENT_RESULT_SLIDE;
+            }
+
+            if (vel->x * vel->x + vel->z * vel->z > JUMP_SPEED_THRESHOLD * JUMP_SPEED_THRESHOLD) {
+                return GROUND_MOVEMENT_RESULT_JUMP;
+            }
+
+            return GROUND_MOVEMENT_RESULT_FALL;
         } else if (ground_contact->other_object == 0) {
             vector3_t offset;
             vector3Sub(pos, &player->last_good_footing, &offset);
@@ -484,7 +626,7 @@ enum player_ground_movement_result player_handle_ground_movement(struct player* 
 
     player_handle_look(player, target_direction);
 
-    if (player->cutscene_actor.collider.is_pushed) {
+    if (collider->is_pushed) {
         return GROUND_MOVEMENT_RESULT_GROUNDED;
     }
 
@@ -515,9 +657,6 @@ enum player_ground_movement_result player_handle_ground_movement(struct player* 
         float prev_y = vel->y;
 
         vector3Scale(&projected_target_direction, vel, PLAYER_MAX_SPEED);
-        if (ground_contact->surface_type == SURFACE_TYPE_COYOTE) {
-            vel->y = prev_y;
-        }
     }
 
     if (ground_contact->other_object) {
@@ -537,8 +676,55 @@ enum player_ground_movement_result player_handle_ground_movement(struct player* 
 }
 
 void player_handle_air_movement(struct player* player, contact_t* ground_contact) {
-    if (player->cutscene_actor.collider.is_pushed) {
+    dynamic_object_t* collider = &player->cutscene_actor.collider;
+
+    if (collider->is_pushed) {
         return;
+    }
+
+    struct Vector3 target_direction;
+    player_get_input_direction(player, &target_direction);
+
+    if (ground_contact && vector3Dot(&target_direction, &ground_contact->normal) < 0.0f) {
+        vector3ProjectPlane(&target_direction, &ground_contact->normal, &target_direction);
+    }
+
+    float prev_y = collider->velocity.y;
+    vector3Scale(&target_direction, &collider->velocity, PLAYER_MAX_SPEED);
+    collider->velocity.y = prev_y;
+
+    switch (grab_checker_update(&player->grab_checker, &player->cutscene_actor.collider, &target_direction, climb_from_hang_data.max_climb_height)) {
+        case GRAB_MODE_CLIMB: {
+            struct Vector3 target;
+            grab_checker_get_climb_to(&player->grab_checker, &target);
+    
+            vector3_t offset;
+            vector3Sub(&target, &player->cutscene_actor.transform.position, &offset);
+    
+            vector2_t* rot = player_get_rotation(player);
+    
+            if (offset.y < climb_from_hang_data.max_climb_height && 
+                offset.y - collider->velocity.y * fixed_time_step >= climb_from_hang_data.animation_height &&
+                offset.x * -rot->y + offset.z * rot->x > 0) {
+                player_enter_hanging_state(player, &target);
+            }
+            grab_checker_clear(&player->grab_checker);
+            break;
+        }
+        case GRAB_MODE_HANG:
+            // if (collider->velocity.y < 0.0f) {
+            //     player_enter_drop_to_hang(player);
+            //     break;
+            // }
+            // grab_checker_clear(&player->grab_checker);
+        default:
+            break;
+    }
+}
+
+bool player_handle_water_movement(struct player* player, contact_t* ground_contact) {
+    if (player->cutscene_actor.collider.is_pushed) {
+        return false;
     }
 
     struct Vector3 target_direction;
@@ -550,9 +736,25 @@ void player_handle_air_movement(struct player* player, contact_t* ground_contact
         vector3ProjectPlane(&target_direction, &ground_contact->normal, &target_direction);
     }
 
-    float prev_y = player->cutscene_actor.collider.velocity.y;
-    vector3Scale(&target_direction, &player->cutscene_actor.collider.velocity, PLAYER_MAX_SPEED);
-    player->cutscene_actor.collider.velocity.y = prev_y;
+    vector3_t* vel = player_get_velocity(player);
+
+    vector3_t target_vel;
+    vector3Scale(&target_direction, &target_vel, PLAYER_MAX_SWIM_SPEED);
+
+    float prev_y = vel->y;
+    vector3MoveTowards(
+        vel,
+        &target_vel,
+        fixed_time_step * PLAYER_SWIM_ACCEL,
+        vel
+    );
+    vel->y = prev_y;
+
+    if (player_check_grab(player, &target_direction, &climb_from_water_data, 1)) {
+        return true;
+    }
+
+    return false;
 }
 
 bool player_handle_a_action(struct player* player, interactable_t* interactable, entity_id interact_entity_id) {
@@ -563,36 +765,33 @@ bool player_handle_a_action(struct player* player, interactable_t* interactable,
     return false;
 }
 
+static player_animation_t spell_animation_mapping[SPELL_ANIMATION_COUNT] = {
+    [SPELL_ANIMATION_NONE] = PLAYER_ANIMATION_COUNT,
+    [SPELL_ANIMATION_SWING_0] = PLAYER_ANIMATION_SWING_ATTACK_0,
+    [SPELL_ANIMATION_SWING_1] = PLAYER_ANIMATION_SWING_ATTACK_1,
+    [SPELL_ANIMATION_SPIN] = PLAYER_ANIMATION_SPIN_ATTACK,
+    [SPELL_ANIMATION_CAST_UP] = PLAYER_ANIMATION_CAST_UP,
+    [SPELL_ANIMATION_CAST_FORWARD] = PLAYER_ANIMATION_ATTACK,
+    [SPELL_ANIMATION_CAST_FORWARD_HOLD] = PLAYER_ANIMATION_ATTACK_HOLD,
+    [SPELL_ANIMATION_CAST_GROUND] = PLAYER_ANIMATION_ATTACK_GROUND,
+};
+
 void player_check_for_animation_request(struct player* player, struct spell_data_source* source) {
     if (source->request_animation) {
         source->flags.is_animating = 1;
 
-        enum player_animation to_play = PLAYER_ANIMATION_COUNT;
-        switch (source->request_animation) {
-            case SPELL_ANIMATION_SWING_0:
-                to_play = PLAYER_ANIMATION_SWING_ATTACK_0;
-                break;
-            case SPELL_ANIMATION_SWING_1:
-                to_play = PLAYER_ANIMATION_SWING_ATTACK_1;
-                break;
-            case SPELL_ANIMATION_SPIN:
-                to_play = PLAYER_ANIMATION_SPIN_ATTACK;
-                break;
-            case SPELL_ANIMATION_CAST_UP:
-                to_play = PLAYER_ANIMATION_CAST_UP;
-                break;
-            case SPELL_ANIMATION_CAST_FORWARD:
-                to_play = PLAYER_ANIMATION_ATTACK;
-                break;
-            case SPELL_ANIMATION_CAST_FORWARD_HOLD:
-                to_play = PLAYER_ANIMATION_ATTACK_HOLD;
-                break;
-        }
+        enum player_animation to_play = source->request_animation < SPELL_ANIMATION_COUNT ? 
+            spell_animation_mapping[source->request_animation] : 
+            PLAYER_ANIMATION_COUNT;
         
         if (to_play != PLAYER_ANIMATION_COUNT) {
             if (!player_is_running(player, to_play)) {
                 player_run_clip(player, to_play);
             }
+            if (source->flags.source == SPELL_CAST_SOURCE_STAFF) {
+                player->cutscene_actor.animator.blend_frames = 0;
+            }
+
             player->last_spell_animation = player->animations[to_play];
         } else {
             player->last_spell_animation = NULL;
@@ -606,13 +805,19 @@ void player_check_for_animation_request(struct player* player, struct spell_data
     }
 }
 
+bool player_should_medidate(struct player* player) {
+    joypad_buttons_t pressed = joypad_get_buttons_pressed(0);
+    mana_pool_t* mana_pool = spell_exec_get_pool(&player->spell_exec);
+    return pressed.b && mana_pool->current_mana <= 0.0001f;
+}
+
 bool player_check_for_casting(struct player* player) {
     joypad_buttons_t pressed = joypad_get_buttons_pressed(0);
 
     struct spell_data_source* source = &player->player_spell_sources[4];
     
     if (source->flags.is_animating) {
-        if (pressed.a && spell_exec_has_recast(&player->spell_exec, 4)) {
+        if (pressed.b && spell_exec_has_recast(&player->spell_exec, 4)) {
             spell_exec_start(&player->spell_exec, 4, live_cast_use_spell(&player->live_cast), source);
         }
         player_check_for_animation_request(player, source);
@@ -624,7 +829,7 @@ bool player_check_for_casting(struct player* player) {
 
     bool has_spell = live_cast_has_pending_spell(&player->live_cast);
 
-    if (has_spell && pressed.a) {
+    if (has_spell && pressed.b) {
         spell_exec_start(&player->spell_exec, 4, live_cast_use_spell(&player->live_cast), source);
         player_check_for_animation_request(player, source);
         return true;
@@ -672,18 +877,7 @@ void player_update_sliding(struct player* player, struct contact* ground_contact
     }
 }
 
-void player_update_jumping(struct player* player, struct contact* ground_contact) {
-    struct dynamic_object* collider = &player->cutscene_actor.collider;
-
-    if (collider->velocity.y < 0.0f) {
-        player_enter_falling_state(player);
-    } else if (ground_contact) {
-        player_enter_grounded_state(player, ground_contact);
-        player_run_clip(player, PLAYER_ANIMATION_LAND);
-    }
-}
-
-void player_update_falling(struct player* player, struct contact* ground_contact) {
+void player_update_airborn(struct player* player, struct contact* ground_contact) {
     struct dynamic_object* collider = &player->cutscene_actor.collider;
 
     player_check_for_casting(player);
@@ -696,29 +890,68 @@ void player_update_falling(struct player* player, struct contact* ground_contact
             player_run_clip(player, PLAYER_ANIMATION_LAND);
         }
         return;
-    } else if (collider->under_water) {
-        player->state = PLAYER_SWIMMING;
-        player_loop_animation(player, PLAYER_ANIMATION_TREAD_WATER, 1.0f);
+    }
+    
+    if (collider->under_water) {
+        player_enter_swimming_state(player);
         return;
-    } else if (!player_is_running(player, PLAYER_ANIMATION_JUMP_PEAK)) {
-        player_loop_animation(player, PLAYER_ANIMATION_FALL, 1.0f);
+    }
+    
+    if (player->state == PLAYER_JUMPING) {
+        if (collider->velocity.y < 0.0f) {
+            player_enter_falling_state(player);
+        }
+    } else {
+        if (!player_is_running(player, PLAYER_ANIMATION_JUMP_PEAK)) {
+            player_loop_animation(player, PLAYER_ANIMATION_FALL, 1.0f);
+        }
     }
     
     player_handle_air_movement(player, ground_contact);
 }
 
+void player_update_hanging(struct player* player, struct contact* ground_contact) {
+    vector3_t* pos = player_get_position(player);
+
+    vector3_t offset;
+    vector3Sub(&player->state_data.hanging.climb_target, pos, &offset);
+
+    player_look_towards(player, &offset);
+
+    pos->y = player->state_data.hanging.climb_target.y - climb_from_hang_data.animation_height;
+    player->cutscene_actor.collider.velocity = gZeroVec;
+
+    if (player->state_data.hanging.input_delay > 0.0f) {
+        player->state_data.hanging.input_delay -= fixed_time_step;
+    } else {
+        vector3_t input_dir;
+        player_get_input_direction(player, &input_dir);
+        vector3_t forward_dir;
+        vector2ToLookDir(&player->cutscene_actor.transform.rotation, &forward_dir);
+    
+        float input_dot = vector3Dot(&input_dir, &forward_dir);
+    
+        if (input_dot > 0.5f) {
+            player_enter_climb_from_hang(player);
+        } else if (input_dot < -0.5f) {
+            player_enter_falling_state(player);
+        }
+    }
+}
+
 void player_update_swimming(struct player* player, struct contact* ground_contact) {
     struct dynamic_object* collider = &player->cutscene_actor.collider;
 
-    player_handle_air_movement(player, ground_contact);
+    if (player_handle_water_movement(player, ground_contact)) {
+        return;
+    }
 
-    if (ground_contact) {
+    if (ground_contact && collider->velocity.y < 0.0f) {
         player_enter_grounded_state(player, ground_contact);
         player_run_clip(player, PLAYER_ANIMATION_LAND);
         return;
     } else if (!collider->under_water) {
-        player->state = PLAYER_FALLING;
-        player_loop_animation(player, PLAYER_ANIMATION_FALL, 1.0f);
+        player_enter_falling_state(player);
         return;
     }
 
@@ -726,7 +959,7 @@ void player_update_swimming(struct player* player, struct contact* ground_contac
     horizontal_velocity.y = 0.0f;
     float speed = sqrtf(vector3MagSqrd(&horizontal_velocity));
 
-    player_loop_animation(player, speed > 0.1f ? PLAYER_ANIMATION_SWIM : PLAYER_ANIMATION_TREAD_WATER, 1.0f);
+    player_loop_animation(player, speed > 0.2f ? PLAYER_ANIMATION_SWIM : PLAYER_ANIMATION_TREAD_WATER, 1.0f);
 }
 
 void player_getting_up(struct player* player, struct contact* ground_contact) {
@@ -735,11 +968,23 @@ void player_getting_up(struct player* player, struct contact* ground_contact) {
     }
 }
 
+void player_drop_to_hang(player_t* player) {
+    if (!player_is_running_any(player)) {
+        player_run_clip_keep_translation(player, PLAYER_ANIMATION_HANG);
+        player_enter_hanging_state(player, &player->state_data.drop_to_hang.climb_target);
+        return;
+    }
+
+    vector2RotateTowards(&player->cutscene_actor.transform.rotation, &player->state_data.drop_to_hang.target_rotation, &player_max_rotation, &player->cutscene_actor.transform.rotation);
+    player->cutscene_actor.collider.velocity = gZeroVec;
+    player->cutscene_actor.transform.position = player->state_data.drop_to_hang.climb_target;
+}
+
 void player_climbing_up(struct player* player, struct contact* ground_contact) {
     union state_data* state = &player->state_data;
-    struct climb_up_data* climb_up = &climb_up_data[state->climbing_up.climb_up_index];
+    struct climb_up_data* climb_up = state->climbing_up.climb_up_data;
 
-    if (state->climbing_up.timer > climb_up->end_jump_time && !player_is_running(player, PLAYER_ANIMATION_CLIMB_UP_0 + state->climbing_up.climb_up_index)) {
+    if (state->climbing_up.timer > climb_up->end_jump_time && !player_is_running_any(player)) {
         player_enter_grounded_state(player, ground_contact);
         player_run_clip_keep_translation(player, PLAYER_ANIMATION_IDLE);
         return;
@@ -761,9 +1006,7 @@ void player_climbing_up(struct player* player, struct contact* ground_contact) {
     player->state_data.climbing_up.timer += fixed_time_step;
 }
 
-void player_position_drop(player_t* player, dynamic_object_t* obj) {
-    vector3_t target;
-
+void player_position_drop(player_t* player, dynamic_object_t* obj, bool throw) {
     transform_sa_t* player_transform = &player->cutscene_actor.transform;
 
     vector3_t forward;
@@ -779,12 +1022,20 @@ void player_position_drop(player_t* player, dynamic_object_t* obj) {
     obj->velocity.x = player->cutscene_actor.collider.velocity.x;
     obj->velocity.y = player->cutscene_actor.collider.velocity.y - CARRY_DROP_SPEED;
     obj->velocity.z = player->cutscene_actor.collider.velocity.z;
+
+    if (throw) {
+        obj->velocity.x -= forward.x * CARRY_THROW_VEL;
+        obj->velocity.y = CARRY_THROW_VEL_VERT;
+        obj->velocity.z -= forward.z * CARRY_THROW_VEL;
+        obj->collision_group = player->cutscene_actor.collider.collision_group;
+    }
 }
 
 void player_carry(player_t* player, contact_t* ground_contact) {
     state_data_t* state_data = (state_data_t*)&player->state_data;
 
     dynamic_object_t* obj = collision_scene_find_object(state_data->carrying.carrying);
+    vector3_t* vel = player_get_velocity(player);
 
     if (!obj) {
         player->state = ground_contact ? PLAYER_GROUNDED : PLAYER_FALLING;
@@ -795,6 +1046,7 @@ void player_carry(player_t* player, contact_t* ground_contact) {
         transform_sa_t* player_transform = &player->cutscene_actor.transform;
 
         struct Transform cast_transform;
+        animator_apply(&player->cutscene_actor.animator, player->cutscene_actor.armature);
         armature_bone_transform(player->cutscene_actor.armature, player->renderable.mesh_render.mesh->attachments[0].bone_index, &cast_transform);
 
         struct Vector3 position;
@@ -804,7 +1056,7 @@ void player_carry(player_t* player, contact_t* ground_contact) {
         transformSaTransformPoint(player_transform, &cast_transform.position, &position);
         position.y += state_data->carrying.carry_offset;
         *obj->position = position;
-        obj->velocity = player->cutscene_actor.collider.velocity;
+        obj->velocity = *vel;
 
         if (obj->rotation) {
             *obj->rotation = player_transform->rotation;
@@ -812,7 +1064,7 @@ void player_carry(player_t* player, contact_t* ground_contact) {
     }
 
     if (player_is_running(player, PLAYER_ANIMATION_CARRY_PICKUP)) {
-        if (animator_get_time(&player->cutscene_actor.animator) > CARRY_GRAB_TIME) {
+        if (animator_get_time(&player->cutscene_actor.animator) > CARRY_GRAB_TIME && !player->state_data.carrying.should_carry) {
             player->state_data.carrying.should_carry = true;
             obj->is_fixed = true;
             obj->weight_class = WEIGHT_CLASS_GHOST;
@@ -821,12 +1073,17 @@ void player_carry(player_t* player, contact_t* ground_contact) {
         return;
     }
 
-    if (player_is_running(player, PLAYER_ANIMATION_CARRY_DROP)) {
-        if (animator_get_time(&player->cutscene_actor.animator) > CARRY_DROP_TIME) {
-            player_position_drop(player, obj);
+    if (player_is_running(player, PLAYER_ANIMATION_CARRY_DROP) || player_is_running(player, PLAYER_ANIMATION_THROW)) {
+        if (player->cutscene_actor.animator.events.attack && player->state_data.carrying.should_carry) {
+            bool was_throw = player_is_running(player, PLAYER_ANIMATION_THROW);
+            player_position_drop(player, obj, was_throw);
             player->state_data.carrying.should_carry = false;
             obj->is_fixed = false;
-            obj->weight_class =  WEIGHT_CLASS_LIGHT;
+            obj->weight_class = WEIGHT_CLASS_LIGHT;
+            dynamic_object_wake(obj);
+            if (was_throw) {
+                interactable_get(obj->entity_id)->flags.thrown = true;
+            }
         }
 
         return;
@@ -840,7 +1097,11 @@ void player_carry(player_t* player, contact_t* ground_contact) {
     joypad_buttons_t pressed = joypad_get_buttons_pressed(0);
 
     if (pressed.a) {
-        player_run_clip(player, PLAYER_ANIMATION_CARRY_DROP);
+        if (vector3MagSqrd2D(vel) < CARRY_THROW_THRESHOLD * CARRY_THROW_THRESHOLD) {
+            player_run_clip(player, PLAYER_ANIMATION_CARRY_DROP);
+        } else {
+            player_run_clip(player, PLAYER_ANIMATION_THROW);
+        }
         return;
     }
     
@@ -877,6 +1138,65 @@ void player_carry(player_t* player, contact_t* ground_contact) {
     player_loop_animation(player, PLAYER_ANIMATION_CARRY_RUN, speed * (1.0f / PLAYER_MAX_SPEED));
 }
 
+void player_exit_meditate(struct player* player) {
+    if (player->state_data.meditate.glow_effect) {
+        scale_in_fade_out_stop(player->state_data.meditate.glow_effect);
+        player->state_data.meditate.glow_effect = NULL;
+    }
+    player->state_data.meditate.is_active = false;
+}
+
+void player_meditate(struct player* player, struct contact* ground_contact) {
+    if (!ground_contact) {
+        player_exit_meditate(player);
+        player_enter_falling_state(player);
+        return;
+    }
+
+    if (player->cutscene_actor.collider.under_water) {
+        player_exit_meditate(player);
+        player_enter_swimming_state(player);
+        return;
+    }
+    
+    joypad_buttons_t buttons = joypad_get_buttons_held(0);
+    mana_pool_t* pool = spell_exec_get_pool(&player->spell_exec);
+
+    if (!player->state_data.meditate.is_active) {
+        if (!player_is_running(player, PLAYER_ANIMATION_MEDITATE_END)) {
+            player_enter_grounded_state(player, ground_contact);
+        }
+        return;
+    }
+
+    if (!buttons.b || pool->current_mana >= MAX_MEDITATE_MANA) {
+        player_exit_meditate(player);
+        if (player_is_running(player, PLAYER_ANIMATION_MEDITATE_LOOP)) {
+            player_run_clip(player, PLAYER_ANIMATION_MEDITATE_END);
+        }
+        return;
+    }
+
+    if (player_is_running(player, PLAYER_ANIMATION_MEDITATE_LOOP)) {
+        pool->current_mana += fixed_time_step * 10.0f;
+    } else if (!player_is_running(player, PLAYER_ANIMATION_MEDITATE_START)) {
+        player_loop_animation(player, PLAYER_ANIMATION_MEDITATE_LOOP, 1.0f);
+    } else if (!player->state_data.meditate.glow_effect && player->cutscene_actor.animator.events.attack) {
+        player->state_data.meditate.glow_effect = scale_in_fade_out_new(
+            player_effects.meditate_glow,
+            player_get_position(player),
+            &gRight,
+            1.0f
+        );
+        player->state_data.meditate.glow_effect->base_color = (color_t){
+            0x34,
+            0xB8,
+            0x41,
+            0xBA,
+        };
+    }
+}
+
 void player_update_die(struct player* player, struct contact* ground_contact) {
 
 }
@@ -898,6 +1218,10 @@ void player_update_knockback(struct player* player, struct contact* ground_conta
 
     if (!player_is_running(player, PLAYER_ANIMATION_KNOCKED_BACK)) {
         player_loop_animation(player, PLAYER_ANIMATION_KNOCKBACK_FLY, 1.0f);
+    }
+
+    if (player->cutscene_actor.collider.under_water) {
+        player_enter_swimming_state(player);
     }
 }
 
@@ -986,10 +1310,19 @@ void player_strafe_animation(struct player* player, float speed, dynamic_object_
     );
 }
 
+void player_update_start(struct player* player, struct contact* ground_contact) {
+    if (ground_contact) {
+        player_enter_grounded_state(player, ground_contact);
+    } else if (player->state_data.start.ground_delay) {
+        --player->state_data.start.ground_delay;
+    } else {
+        player_enter_falling_state(player);
+    }
+}
+
 void player_update_grounded(struct player* player, struct contact* ground_contact) {
     joypad_buttons_t pressed = joypad_get_buttons_pressed(0);
     vector3_t* vel = &player->cutscene_actor.collider.velocity;
-    vector3_t* pos = & player->cutscene_actor.transform.position;
     struct dynamic_object* collider = &player->cutscene_actor.collider;
  
     entity_id interact_entity_id = 0;
@@ -1011,24 +1344,28 @@ void player_update_grounded(struct player* player, struct contact* ground_contac
         return;
     }
 
-    if (last_interaction_type == INTERACT_TYPE_NONE) {
-        player_check_for_casting(player);
+    if (player_should_medidate(player)) {
+        player_enter_meditate_state(player);
+        return;
+    } else if (!tutorial_is_running() && spell_exec_get_pool(&player->spell_exec)->current_mana <= 0.0f) {
+        tutorial_set_step(TUTORIAL_MENU_MEDITATE);
     }
+
+    player_check_for_casting(player);
 
     if (player->last_spell_animation && animator_is_running_clip(&player->cutscene_actor.animator, player->last_spell_animation)) {
         return;
     }
     
     if (collider->is_jumping) {
-        player->state = PLAYER_JUMPING;
-        player_run_clip(player, PLAYER_ANIMATION_JUMP);
+        player_enter_jump_state(player);
         return;
     }
 
     struct Vector3 target_direction;
     player_get_input_direction(player, &target_direction);
 
-    if (player_check_grab(player, &target_direction)) {
+    if (fabsf(vel->y) < MAX_VERTICAL_DELTA && player_check_grab(player, &target_direction, climb_up_data, CLIMB_UP_COUNT)) {
         return;
     }
 
@@ -1036,8 +1373,19 @@ void player_update_grounded(struct player* player, struct contact* ground_contac
     enum player_ground_movement_result move_result = player_handle_ground_movement(player, ground_contact, &target_direction, &speed);
 
     if (move_result == GROUND_MOVEMENT_RESULT_FALL) {
-        player_run_clip(player, PLAYER_ANIMATION_JUMP_PEAK);
-        player->state = PLAYER_FALLING;
+        contact_t* shadow_contact = player->cutscene_actor.collider.shadow_contact;
+
+        float fall_height = shadow_contact ? player_get_position(player)->y - shadow_contact->point.y : JUMP_OVERHANG_HEIGHT;
+
+        if (fall_height > JUMP_OVERHANG_HEIGHT) {
+            player_enter_falling_state(player);
+            return;
+        }
+    }
+
+    if (move_result == GROUND_MOVEMENT_RESULT_JUMP) {
+        player_enter_jump_state(player);
+        vel->y = 3.0f;
         return;
     }
 
@@ -1057,13 +1405,14 @@ void player_update_grounded(struct player* player, struct contact* ground_contac
         }
     }
 
-    if (player_is_running(player, PLAYER_ANIMATION_LAND)) {
+    if (player_is_running(player, PLAYER_ANIMATION_LAND) && !collider->is_pushed) {
+        vel->x = 0.0f;
+        vel->z = 0.0f;
         return;
     }
 
     if (collider->under_water) {
-        player->state = PLAYER_SWIMMING;
-        player_loop_animation(player, PLAYER_ANIMATION_TREAD_WATER, 1.0f);
+        player_enter_swimming_state(player);
         return;
     }
 
@@ -1105,14 +1454,21 @@ void player_update_grounded(struct player* player, struct contact* ground_contac
 
 void player_update_state(struct player* player, struct contact* ground_contact) {
     switch (player->state) {
+        case PLAYER_START:
+            player_update_start(player, ground_contact);
+            break;
+        case PLAYER_GROUNDED:
+            player_update_grounded(player, ground_contact);
+            break;
         case PLAYER_SLIDING:
             player_update_sliding(player, ground_contact);
             break;
         case PLAYER_JUMPING:
-            player_update_jumping(player, ground_contact);
-            break;
         case PLAYER_FALLING:
-            player_update_falling(player, ground_contact);
+            player_update_airborn(player, ground_contact);
+            break;
+        case PLAYER_HANGING:
+            player_update_hanging(player, ground_contact);
             break;
         case PLAYER_SWIMMING:
             player_update_swimming(player, ground_contact);
@@ -1123,17 +1479,24 @@ void player_update_state(struct player* player, struct contact* ground_contact) 
         case PLAYER_GETTING_UP:
             player_getting_up(player, ground_contact);
             break;
+        case PLAYER_DROP_TO_HANG:
+            player_drop_to_hang(player);
+            break;
         case PLAYER_CLIMBING_UP:
             player_climbing_up(player, ground_contact);
             break;
         case PLAYER_CARRY:
             player_carry(player, ground_contact);
             break;
+        case PLAYER_MEDITATE:
+            player_meditate(player, ground_contact);
+            break;
         case PLAYER_DIE:
             player_update_die(player, ground_contact);
             break;
+        case PLAYER_DISABLED:
+            break;
         default:
-            player_update_grounded(player, ground_contact);
             break;
     }
 }
@@ -1179,16 +1542,6 @@ void player_update_spells(struct player* player, joypad_inputs_t input, joypad_b
     struct spell_data_source* source = &player->player_spell_sources[4];
 
     if (source->flags.is_animating) {
-        struct Transform cast_transform;
-        armature_bone_transform(player->cutscene_actor.armature, player->renderable.mesh_render.mesh->attachments[0].bone_index, &cast_transform);
-
-        struct Vector3 direction;
-        quatMultVector(&cast_transform.rotation, &gUp, &direction);
-        vector3RotateWith2(&direction, &player->cutscene_actor.transform.rotation, &source->direction);
-
-        vector3RotateWith2(&cast_transform.position, &player->cutscene_actor.transform.rotation, &direction);
-        vector3AddScaled(&player->cutscene_actor.transform.position, &direction, 1.0f / MODEL_SCALE, &source->position);
-
         if (!animator_is_running_clip(&player->cutscene_actor.animator, player->last_spell_animation)) {
             source->flags.is_animating = 0;
             source->flags.cast_state = SPELL_CAST_STATE_INACTIVE;
@@ -1200,25 +1553,54 @@ void player_update_spells(struct player* player, joypad_inputs_t input, joypad_b
             source->flags.can_recast = player->cutscene_actor.animator.events.can_recast;
         }
     } else {
-        source->direction = castDirection;
-        source->position = player->cutscene_actor.transform.position;
-        source->position.y += 1.0f;
-        source->flags.cast_state = input.btn.a ? SPELL_CAST_STATE_ACTIVE : SPELL_CAST_STATE_INACTIVE;
+        source->flags.cast_state = input.btn.b ? SPELL_CAST_STATE_ACTIVE : SPELL_CAST_STATE_INACTIVE;
     }
-    source->flags.cast_held = input.btn.a;
 
-    if (pressed.b) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_LIFE);
-    } else if (pressed.c_up) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_AIR);
-    } else if (pressed.c_down) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_EARTH);
-    } else if (pressed.c_right) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_FIRE);
-    } else if (pressed.c_left) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_WATER);
-    } else if (live_cast_has_pending_spell(&player->live_cast) && pressed.r) {
-        live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_BREAK);
+    switch (source->flags.source) {
+        case SPELL_CAST_SOURCE_STAFF: {
+            struct Transform cast_transform;
+            animator_apply(&player->cutscene_actor.animator, player->cutscene_actor.armature);
+            armature_bone_transform(player->cutscene_actor.armature, player->renderable.mesh_render.mesh->attachments[0].bone_index, &cast_transform);
+
+            struct Vector3 direction;
+            quatMultVector(&cast_transform.rotation, &gUp, &direction);
+            vector3RotateWith2(&direction, &player->cutscene_actor.transform.rotation, &source->direction);
+
+            vector3RotateWith2(&cast_transform.position, &player->cutscene_actor.transform.rotation, &direction);
+            vector3AddScaled(&player->cutscene_actor.transform.position, &direction, 1.0f / MODEL_SCALE, &source->position);
+
+            break;
+        }
+        case SPELL_CAST_SOURCE_CENTER:
+        case SPELL_CAST_SOURCE_FEET:
+            source->direction = castDirection;
+            source->position = player->cutscene_actor.transform.position;
+            if (source->flags.source == SPELL_CAST_SOURCE_CENTER) {
+                source->position.y += 1.0f;
+            }
+            break;
+    }
+
+    source->flags.cast_held = input.btn.b;
+
+    if (pressed.z) {
+        live_cast_reset(&player->live_cast);   
+    }
+
+    if (input.btn.z) {
+        if (pressed.l) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_LIFE);
+        } else if (pressed.c_up) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_AIR);
+        } else if (pressed.c_down) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_EARTH);
+        } else if (pressed.c_right) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_FIRE);
+        } else if (pressed.c_left) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_WATER);
+        } else if (live_cast_has_pending_spell(&player->live_cast) && pressed.r) {
+            live_cast_append_symbol(&player->live_cast, SPELL_SYMBOL_BREAK);
+        }
     }
 }
 
@@ -1302,6 +1684,8 @@ void player_update(struct player* player) {
         debug_collider_enable();
     } else if (pressed.d_down) {
         debug_collider_disable();
+    } else if (pressed.d_right) {
+        tutorial_set_step(TUTORIAL_MENU_CREATE_FIRE);
     }
 
     player_handle_z_target(player, pressed.z, input.btn.z);
@@ -1309,6 +1693,10 @@ void player_update(struct player* player) {
     player_update_spells(player, input, pressed);
     player_check_collectables(player);
     player_check_inventory(player);
+    health_recieve_contact_damage(&player->health, player->cutscene_actor.collider.active_contacts);
+
+    dynamic_object_wake(&player->cutscene_actor.collider);
+    water_simulation_apply_impulse_center(player_get_position(player));
 
     if (cutscene_actor_update(&player->cutscene_actor) || !update_has_layer(UPDATE_LAYER_WORLD)) {
         return;
@@ -1318,8 +1706,6 @@ void player_update(struct player* player) {
     struct contact* ground = dynamic_object_get_combined_ground(&player->cutscene_actor.collider, &compbined_ground);
     
     player_update_state(player, ground);
-    
-    vector3_t* pos = &player->cutscene_actor.transform.position;
 
     if (player->cutscene_actor.collider.hit_kill_plane) {
         player->cutscene_actor.transform.position = player->last_good_footing;
@@ -1369,6 +1755,8 @@ static const char* animation_clip_names[PLAYER_ANIMATION_COUNT] = {
     [PLAYER_ANIMATION_AIR_DASH] = "air_das",
     [PLAYER_ANIMATION_TAKE_DAMAGE] = "take_damage",
     
+    [PLAYER_ANIMATION_ATTACK_GROUND] = "attack_ground",
+    
     [PLAYER_ANIMATION_TREAD_WATER] = "tread_water",
     [PLAYER_ANIMATION_SWIM] = "swim",
     
@@ -1389,6 +1777,12 @@ static const char* animation_clip_names[PLAYER_ANIMATION_COUNT] = {
     [PLAYER_ANIMATION_CLIMB_UP_0] = "climb_0",
     [PLAYER_ANIMATION_CLIMB_UP_1] = "climb_1",
     [PLAYER_ANIMATION_CLIMB_UP_2] = "climb_2",
+
+    [PLAYER_ANIMATION_DROP_TO_HANG] = "drop_to_hang",
+    [PLAYER_ANIMATION_CLIMB_FROM_HANG] = "climb_from_hang",
+    [PLAYER_ANIMATION_HANG] = "hang",
+
+    [PLAYER_ANIMATION_CLIMB_FROM_WATER] = "climb_from_water",
     
     [PLAYER_ANIMATION_CARRY_PICKUP] = "carry_pickup",
     [PLAYER_ANIMATION_CARRY_IDLE] = "carry_idle",
@@ -1396,7 +1790,13 @@ static const char* animation_clip_names[PLAYER_ANIMATION_COUNT] = {
     [PLAYER_ANIMATION_CARRY_WALK] = "carry_walk",
     [PLAYER_ANIMATION_CARRY_DROP] = "carry_drop",
 
+    [PLAYER_ANIMATION_THROW] = "throw",
+
     [PLAYER_ANIMATION_SLIDE_FORWARD] = "slide_forward",
+
+    [PLAYER_ANIMATION_MEDITATE_START] = "meditate_start",
+    [PLAYER_ANIMATION_MEDITATE_LOOP] = "meditate_loop",
+    [PLAYER_ANIMATION_MEDITATE_END] = "meditate_end",
 
     [PLAYER_ANIMATION_DIE] = "die",
     
@@ -1427,19 +1827,23 @@ void player_unload_sound(struct player* player) {
     }
 }
 
-void player_init(struct player* player, struct player_definition* definition, struct Transform* camera_transform) {
+void player_init_cam_anim(player_t* player) {
+    char* filename = "rom:/cam_anim/player.canim";
+    FILE* file = asset_fopen(filename, NULL);
+    camera_animations_load(&player->camera_animations, filename, file);
+    fclose(file);
+}
+
+void player_init(struct player* player, struct player_definition* definition) {
     transformSaInitIdentity(&player->cutscene_actor.transform);
     renderable_single_axis_init(&player->renderable, &player->cutscene_actor.transform, "rom:/meshes/characters/apprentice.tmesh");
     renderable_set_animator(&player->renderable, &player->cutscene_actor.animator);
-
-    player->camera_transform = camera_transform;
 
     player->cutscene_actor.transform.position = definition->location;
     player->cutscene_actor.transform.rotation = definition->rotation;
 
     player->last_good_footing = definition->location;
     player->last_footing_normal = gUp;
-    player->coyote_time = 0.0f;
 
     render_scene_add_renderable(&player->renderable, 2.0f);
     update_add(player, (update_callback)player_update, UPDATE_PRIORITY_PLAYER, UPDATE_LAYER_WORLD | UPDATE_LAYER_CUTSCENE);
@@ -1464,14 +1868,18 @@ void player_init(struct player* player, struct player_definition* definition, st
         "rom:/meshes/characters/apprentice.anim"
     );
 
-    player->cutscene_actor.collider.density_class = DYNAMIC_DENSITY_MEDIUM;
     player->cutscene_actor.collider.weight_class = WEIGHT_CLASS_MEDIUM;
     player->cutscene_actor.collider.kill_plane_immune = 1;
 
     spell_exec_init(&player->spell_exec);
-    mana_pool_set_entity_id(&player->spell_exec.spell_sources.mana_pool, ENTITY_ID_PLAYER);
+    mana_pool_t* pool = spell_exec_get_pool(&player->spell_exec);
+    mana_pool_set_entity_id(pool, ENTITY_ID_PLAYER);
+    pool->max_mana = global_load_float(VAR_LOC_player_max_mana);
+    pool->current_mana = global_load_float(VAR_LOC_player_current_mana);
     live_cast_init(&player->live_cast);
-    health_init(&player->health, ENTITY_ID_PLAYER, 100.0f);
+    health_init(&player->health, ENTITY_ID_PLAYER, global_load_float(VAR_LOC_player_max_health));
+    player->health.current_health = global_load_float(VAR_LOC_player_current_health);
+    player->health.has_i_frames = true;
     health_set_callback(&player->health, player_on_damage, player);
     grab_checker_init(&player->grab_checker, &player_actor_def.collider);
 
@@ -1482,6 +1890,7 @@ void player_init(struct player* player, struct player_definition* definition, st
         source->flags.has_animator = 1;
         source->reference_count = 1;
         source->request_animation = 0;
+        source->flags.source = SPELL_CAST_SOURCE_CENTER;
         source->target = ENTITY_ID_PLAYER;
     }
 
@@ -1490,7 +1899,7 @@ void player_init(struct player* player, struct player_definition* definition, st
 
     player->last_spell_animation = NULL;
 
-    player->state = PLAYER_GROUNDED;
+    player_enter_start(player);
 
     player->assets.staffs[0] = tmesh_cache_load("rom:/meshes/objects/staff_default.tmesh");
     player->assets.staffs[1] = NULL;
@@ -1507,9 +1916,29 @@ void player_init(struct player* player, struct player_definition* definition, st
     player->z_target = 0;
     player->z_target_visual.hide = 1;
     player->hover_interaction = 0;
+
+    camera_controller_init(&player->camera_controller, player);
+    player_init_cam_anim(player);
+    camera_animation_map(&player->camera_animations, ENTITY_ID_PLAYER);
+
+    player_effects.meditate_glow = tmesh_cache_load("rom:/meshes/effects/mana_regen.tmesh");
 }
 
 void player_destroy(struct player* player) {
+    global_save_float(VAR_LOC_player_max_health, player->health.max_health);
+    global_save_float(VAR_LOC_player_current_health, player->health.current_health);
+    mana_pool_t* pool = spell_exec_get_pool(&player->spell_exec);
+    global_save_float(VAR_LOC_player_max_mana, pool->max_mana);
+    global_save_float(VAR_LOC_player_current_mana, pool->current_mana);
+    
+    switch (player->state) {
+        case PLAYER_MEDITATE:
+            player_exit_meditate(player);
+            break;
+        default:
+            break;
+    }
+
     renderable_destroy(&player->renderable);
     spell_exec_destroy(&player->spell_exec);
     live_cast_destroy(&player->live_cast);
@@ -1528,4 +1957,18 @@ void player_destroy(struct player* player) {
     render_scene_remove(&player->z_target_visual);
     renderable_destroy(&player->z_target_visual);
     player_unload_sound(player);
+
+    camera_controller_destroy(&player->camera_controller);
+    camera_animation_list_destroy(&player->camera_animations);
+    camera_animation_unmap(ENTITY_ID_PLAYER);
+
+    tmesh_cache_release(player_effects.meditate_glow);
+}
+
+player_t* player_get() {
+    if (current_scene) {
+        return &current_scene->player;
+    }
+
+    return NULL;
 }

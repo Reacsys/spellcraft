@@ -1,0 +1,105 @@
+#ifndef __SCENE_CAMERA_CONTROLLER_H__
+#define __SCENE_CAMERA_CONTROLLER_H__
+
+#include "../render/camera.h"
+#include "../math/cylinder_coords.h"
+#include "camera_animation.h"
+#include "camera_wall_checker.h"
+#include "../math/transform_single_axis.h"
+
+#define CAMERA_FOLLOW_DISTANCE  3.4f
+#define CAMERA_FOLLOW_HEIGHT    1.6f
+
+#define CAMERA_Y_UNCONSTRAINED  -1000000000.0f
+
+struct player;
+
+enum camera_controller_state {
+    CAMERA_STATE_FOLLOW,
+    CAMERA_STATE_LOOK_AT_WITH_PLAYER,
+    CAMERA_STATE_ANIMATE,
+    CAMERA_STATE_BLEND_TO_ANIMATE,
+    CAMERA_STATE_ORBIT_TO_ANIMATE,
+    CAMERA_STATE_RETURN_TO_PLAYER,
+    CAMERA_STATE_FIXED,
+    CAMERA_STATE_MOVE_TO,
+};
+
+struct camera_cached_calcuations {
+    float fov;
+    float fov_horz;
+    float cos_1_3_fov_horz;
+    float sin_1_3_fov_horz;
+};
+
+typedef struct {
+    vector2_t max_rotation;
+    cylinder_coords_t coords;
+    float target_height;
+    float target_rad;
+} orbit_args_t;
+
+union camera_controller_state_data {
+    struct {
+        struct camera_animation* animation;
+        transform_sa_t relative_to;
+        uint16_t current_frame;
+        uint8_t blend_frames;
+        uint8_t total_blend_frames;
+        orbit_args_t orbit_args;
+    } animate;
+    struct {
+        bool moving_position;
+        bool moving_look_at;
+    } move_to;
+    struct {
+        float horizontal_velocity;
+        float vertical_angle_vel;
+        float vertical_angle;
+    } follow;
+    struct {
+        bool move_behind;
+    } return_to_player;
+};
+
+struct camera_controller {
+    struct Camera camera;
+    struct Vector3 stable_position;
+    struct player* player;
+    float follow_distace;
+    struct Vector3 target;
+    float min_target_y;
+    float speed;
+    struct Vector3 looking_at;
+    float looking_at_speed;
+    struct Vector3 look_target;
+    struct Vector3 shake_offset;
+    struct Vector3 shake_velocity;
+    camera_wall_checker_t wall_checker;
+    enum camera_controller_state state;
+    union camera_controller_state_data state_data;
+};
+
+typedef struct camera_controller camera_controller_t;
+
+void camera_controller_init(struct camera_controller* controller, struct player* player);
+
+void camera_controller_destroy(struct camera_controller* controller);
+
+void camera_look_at(struct camera_controller* controller, struct Vector3* target);
+void camera_follow_player(struct camera_controller* controller);
+void camera_return(struct camera_controller* controller);
+void camera_behind_player(struct camera_controller* controller);
+void camera_play_animation(struct camera_controller* controller, struct camera_animation* animation, transform_sa_t* relative_to, int blend_frames);
+void camera_move_to(struct camera_controller* controller, struct Vector3* position, bool instant, bool move_target);
+void camera_set_fixed(struct camera_controller* controller, struct Vector3* position, struct Quaternion* rotation, float fov);
+
+bool camera_is_animating(struct camera_controller* controller);
+
+void camera_shake(struct camera_controller* controller, float strength);
+
+void camera_shift_by(struct camera_controller* controller, vector3_t* offset);
+
+bool camera_is_touching_wall(struct camera_controller* controller);
+
+#endif
